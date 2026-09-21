@@ -30,7 +30,7 @@ function stripeClient(): Stripe {
   if (!key) throw new Error("Billing isn't configured (STRIPE_SECRET_KEY is unset).");
   // Pinned so a future stripe package upgrade doesn't silently start
   // talking a newer API version than this code was written against.
-  return new Stripe(key, { apiVersion: "2024-12-18.acacia" });
+  return new Stripe(key, { apiVersion: "2025-02-24.acacia" });
 }
 
 function appBaseUrl(): string {

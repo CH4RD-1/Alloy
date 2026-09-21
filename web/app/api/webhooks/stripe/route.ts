@@ -22,7 +22,7 @@ import { createServiceRoleClient } from "@/lib/supabase/server";
 function stripeClient(): Stripe {
   const key = process.env.STRIPE_SECRET_KEY;
   if (!key) throw new Error("Billing isn't configured (STRIPE_SECRET_KEY is unset).");
-  return new Stripe(key, { apiVersion: "2024-12-18.acacia" });
+  return new Stripe(key, { apiVersion: "2025-02-24.acacia" });
 }
 
 // Pulls the fields Alloy cares about off a Stripe Subscription object and
@@ -31,7 +31,7 @@ function stripeClient(): Stripe {
 // drift into writing these columns two different ways.
 async function syncSubscriptionToOrg(orgId: string, subscription: Stripe.Subscription) {
   const item = subscription.items.data[0];
-  const periodEndUnix = item?.current_period_end ?? null;
+  const periodEndUnix = subscription.current_period_end ?? null;
 
   await createServiceRoleClient()
     .from("orgs")
