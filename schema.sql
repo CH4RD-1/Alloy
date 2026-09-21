@@ -169,6 +169,59 @@ create unique index invites_org_email_pending_uq on invites (org_id, lower(email
   -- revokeInvite's own delete-not-update approach to "undo an invite."
 
 -- ----------------------------------------------------------------------------
+-- Workflow engine (workflows, statuses & transitions)
+-- ----------------------------------------------------------------------------
+
+-- Many workflows per org, one per (type, purpose) — e.g. "Regular Tasks",
+-- "Helpdesk Tickets", "Assets", or any custom workflow a user adds. `type`
+-- says which of the 3 object kinds a workflow is meant for (the new
+-- full-screen editor in components/workflow-panel.tsx groups/filters by
+-- it); it does NOT by itself attach a workflow to any project — that's
+-- projects.workflow_id/asset_workflow_id below, chosen explicitly per
+-- project (see the Manage Projects panel's workflow dropdown(s)).
+create table workflows (
+  id          uuid primary key default gen_random_uuid(),
+  org_id      uuid not null references orgs(id) on delete cascade,
+  name        text not null,
+  type        text not null check (type in ('task','helpdesk','asset')),
+  created_at  timestamptz not null default now()
+);
+
+create index on workflows (org_id);
+
+create table workflow_statuses (
+  id          uuid primary key default gen_random_uuid(),
+  org_id      uuid not null references orgs(id) on delete cascade,
+  workflow_id uuid not null references workflows(id) on delete cascade,
+  key         text not null,        -- stable id, e.g. 'todo' | 'in_review' | 'done' — unique per workflow, not per org (two workflows may reuse a key)
+  label       text not null,        -- display label, fully customisable — states can be added/renamed/removed per workflow
+  color       text not null default '#64748b',
+  position    int not null default 0,
+  is_closed   boolean not null default false,   -- marks a terminal/"done"-equivalent status *within this workflow* — the generic signal every "is this task functionally finished" check uses instead of key === 'done', since a custom or non-Regular-Tasks workflow's terminal key can be anything ('closed', 'available', ...)
+  created_at  timestamptz not null default now(),
+  unique (workflow_id, key)
+);
+
+create index on workflow_statuses (org_id);
+create index on workflow_statuses (workflow_id);
+
+create table workflow_transitions (
+  id                             uuid primary key default gen_random_uuid(),
+  org_id                         uuid not null references orgs(id) on delete cascade,
+  workflow_id                    uuid not null references workflows(id) on delete cascade,
+  from_status_id                 uuid not null references workflow_statuses(id) on delete cascade,
+  to_status_id                   uuid not null references workflow_statuses(id) on delete cascade,
+  allowed_roles                  text[] not null default '{manager,authorizer,standard}',
+  require_subtasks_complete      boolean not null default false,
+  require_checklists_complete    boolean not null default false,
+  created_at                     timestamptz not null default now(),
+  unique (org_id, from_status_id, to_status_id)
+);
+
+create index on workflow_transitions (org_id);
+create index on workflow_transitions (workflow_id);
+
+-- ----------------------------------------------------------------------------
 -- Projects, teams (buckets), tags, custom fields
 -- ----------------------------------------------------------------------------
 
@@ -273,60 +326,6 @@ create table custom_field_defs (
 );
 
 create index on custom_field_defs (org_id);
-
-
--- ----------------------------------------------------------------------------
--- Workflow engine (workflows, statuses & transitions)
--- ----------------------------------------------------------------------------
-
--- Many workflows per org, one per (type, purpose) — e.g. "Regular Tasks",
--- "Helpdesk Tickets", "Assets", or any custom workflow a user adds. `type`
--- says which of the 3 object kinds a workflow is meant for (the new
--- full-screen editor in components/workflow-panel.tsx groups/filters by
--- it); it does NOT by itself attach a workflow to any project — that's
--- projects.workflow_id/asset_workflow_id below, chosen explicitly per
--- project (see the Manage Projects panel's workflow dropdown(s)).
-create table workflows (
-  id          uuid primary key default gen_random_uuid(),
-  org_id      uuid not null references orgs(id) on delete cascade,
-  name        text not null,
-  type        text not null check (type in ('task','helpdesk','asset')),
-  created_at  timestamptz not null default now()
-);
-
-create index on workflows (org_id);
-
-create table workflow_statuses (
-  id          uuid primary key default gen_random_uuid(),
-  org_id      uuid not null references orgs(id) on delete cascade,
-  workflow_id uuid not null references workflows(id) on delete cascade,
-  key         text not null,        -- stable id, e.g. 'todo' | 'in_review' | 'done' — unique per workflow, not per org (two workflows may reuse a key)
-  label       text not null,        -- display label, fully customisable — states can be added/renamed/removed per workflow
-  color       text not null default '#64748b',
-  position    int not null default 0,
-  is_closed   boolean not null default false,   -- marks a terminal/"done"-equivalent status *within this workflow* — the generic signal every "is this task functionally finished" check uses instead of key === 'done', since a custom or non-Regular-Tasks workflow's terminal key can be anything ('closed', 'available', ...)
-  created_at  timestamptz not null default now(),
-  unique (workflow_id, key)
-);
-
-create index on workflow_statuses (org_id);
-create index on workflow_statuses (workflow_id);
-
-create table workflow_transitions (
-  id                             uuid primary key default gen_random_uuid(),
-  org_id                         uuid not null references orgs(id) on delete cascade,
-  workflow_id                    uuid not null references workflows(id) on delete cascade,
-  from_status_id                 uuid not null references workflow_statuses(id) on delete cascade,
-  to_status_id                   uuid not null references workflow_statuses(id) on delete cascade,
-  allowed_roles                  text[] not null default '{manager,authorizer,standard}',
-  require_subtasks_complete      boolean not null default false,
-  require_checklists_complete    boolean not null default false,
-  created_at                     timestamptz not null default now(),
-  unique (org_id, from_status_id, to_status_id)
-);
-
-create index on workflow_transitions (org_id);
-create index on workflow_transitions (workflow_id);
 
 
 -- ----------------------------------------------------------------------------
