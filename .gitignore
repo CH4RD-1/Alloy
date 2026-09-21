@@ -1,0 +1,23 @@
+# Node / Next.js
+node_modules/
+.next/
+*.tsbuildinfo
+npm-debug.log*
+
+# Env files (secrets) — never commit these
+.env
+.env.local
+.env*.local
+
+# Supabase CLI local state
+supabase/.branches/
+supabase/.temp/
+
+# OS
+.DS_Store
+
+# Historical delivery snapshots from the build process (not source of
+# truth — the real code lives under web/) and ad-hoc Supabase Studio SQL
+# Editor query snippets — kept locally, not worth tracking in the repo.
+Claude outputs/
+supabase/snippets/
