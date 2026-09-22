@@ -60,6 +60,33 @@ const LINK_TYPE_META: Record<string, { label: string; className: string }> = {
   clone: { label: "Clone", className: "link-type-clone" },
 };
 
+// Small date-only ("YYYY-MM-DD", as produced by <input type="date">) helpers
+// for the task Dates field-group's "Duration" box below — parsed/formatted
+// via Date.UTC so local-timezone offsets never shift the day by one.
+function parseDateOnly(value: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return null;
+  return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+}
+function formatDateOnly(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+// Duration = number of days between start and due (due - start), so a
+// same-day task has a duration of 0.
+function taskDurationDays(start: string | null | undefined, due: string | null | undefined): number | null {
+  const s = start ? parseDateOnly(start) : null;
+  const e = due ? parseDateOnly(due) : null;
+  if (!s || !e) return null;
+  const days = Math.round((e.getTime() - s.getTime()) / 86400000);
+  return days >= 0 ? days : null;
+}
+function addDaysToDate(start: string, days: number): string {
+  const s = parseDateOnly(start);
+  if (!s) return start;
+  s.setUTCDate(s.getUTCDate() + days);
+  return formatDateOnly(s);
+}
+
 export function TaskPanel({
   taskId,
   allRows,
@@ -405,20 +432,38 @@ export function TaskPanel({
                   onBlur={(e) => run(() => updateTaskFields(taskId, { start_date: e.target.value, due_date: e.target.value }))}
                 />
               ) : (
-                <div className="field-row">
+                <>
+                  <div className="field-row">
+                    <input
+                      type="date"
+                      className="text-input"
+                      defaultValue={task.start_date ?? ""}
+                      onBlur={(e) => run(() => updateTaskFields(taskId, { start_date: e.target.value }))}
+                    />
+                    <input
+                      type="date"
+                      className="text-input"
+                      defaultValue={task.due_date ?? ""}
+                      onBlur={(e) => run(() => updateTaskFields(taskId, { due_date: e.target.value }))}
+                    />
+                  </div>
                   <input
-                    type="date"
-                    className="text-input"
-                    defaultValue={task.start_date ?? ""}
-                    onBlur={(e) => run(() => updateTaskFields(taskId, { start_date: e.target.value }))}
+                    type="number"
+                    min={0}
+                    className="text-input duration-input"
+                    placeholder={task.start_date ? "Duration (days)" : "Set a start date first"}
+                    disabled={!task.start_date}
+                    defaultValue={taskDurationDays(task.start_date, task.due_date) ?? ""}
+                    onBlur={(e) => {
+                      const raw = e.target.value;
+                      if (raw === "" || !task.start_date) return;
+                      const days = Number(raw);
+                      if (!Number.isFinite(days) || days < 0) return;
+                      const due = addDaysToDate(task.start_date, Math.round(days));
+                      run(() => updateTaskFields(taskId, { due_date: due }));
+                    }}
                   />
-                  <input
-                    type="date"
-                    className="text-input"
-                    defaultValue={task.due_date ?? ""}
-                    onBlur={(e) => run(() => updateTaskFields(taskId, { due_date: e.target.value }))}
-                  />
-                </div>
+                </>
               )}
             </div>
           )}

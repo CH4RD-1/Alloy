@@ -497,7 +497,7 @@ create table task_objects (
   id          uuid primary key default gen_random_uuid(),
   org_id      uuid not null references orgs(id) on delete cascade,
   task_id     uuid not null references tasks(id) on delete cascade,
-  kind        text not null check (kind in ('note','file','sketch','checklist','form')),
+  kind        text not null check (kind in ('note','file','sketch','checklist','form','code')),
   position    int not null default 0,
   content     jsonb,               -- note text, sketch data, or small kind-specific payload
   created_by  uuid references users(id) on delete set null,

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useTransition } from "react";
-import type { ChangeEvent, PointerEvent as ReactPointerEvent } from "react";
+import type { ChangeEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useRouter } from "next/navigation";
 import type { TaskObject, ChecklistItem, TaskObjectFile } from "@/lib/types";
 import {
@@ -9,11 +9,13 @@ import {
   createFileTaskObject,
   saveSketchImage,
   updateNoteText,
+  updateCodeBlock,
   deleteTaskObject,
   addChecklistItem,
   updateChecklistItem,
   removeChecklistItem,
 } from "@/lib/actions";
+import { CODE_LANGUAGES, highlightCode } from "@/lib/code-highlight";
 
 type FileWithUrl = TaskObjectFile & { url: string | null };
 
@@ -55,7 +57,7 @@ export function TaskObjects({
     });
   }
 
-  function addObject(kind: "note" | "checklist" | "sketch") {
+  function addObject(kind: "note" | "checklist" | "sketch" | "code") {
     setMenuOpen(false);
     run(() => createTaskObject(orgId, taskId, kind));
   }
@@ -92,7 +94,7 @@ export function TaskObjects({
       )}
       <input ref={fileInputRef} type="file" style={{ display: "none" }} onChange={handleFileSelected} />
       {objects.length === 0 ? (
-        <p style={{ color: "var(--text-faint)", fontSize: 12 }}>Add a text note, file, sketch, or checklist.</p>
+        <p style={{ color: "var(--text-faint)", fontSize: 12 }}>Add a text note, file, sketch, code block, or checklist.</p>
       ) : (
         <div className="obj-list">
           {objects.map((o) => {
@@ -143,6 +145,17 @@ export function TaskObjects({
                 />
               );
             }
+            if (o.kind === "code") {
+              return (
+                <CodeCard
+                  key={o.id}
+                  obj={o}
+                  pending={pending}
+                  onChange={(code, language) => run(() => updateCodeBlock(o.id, code, language))}
+                  onRemove={() => run(() => deleteTaskObject(o.id))}
+                />
+              );
+            }
             // "form" — created only via the Portal, not rendered in this
             // pass. Shown as a stub rather than silently vanishing.
             return (
@@ -179,6 +192,9 @@ export function TaskObjects({
             </button>
             <button type="button" className="obj-menu-item" onClick={() => addObject("sketch")}>
               Sketch pad
+            </button>
+            <button type="button" className="obj-menu-item" onClick={() => addObject("code")}>
+              Code block
             </button>
             <button type="button" className="obj-menu-item" onClick={() => addObject("checklist")}>
               Checklist
@@ -297,12 +313,308 @@ function FileCard({
   );
 }
 
+// A code-block attachment: language dropdown (a curated hljs subset plus
+// "Auto-detect", "Auto" being the default for a new block) over a
+// click-to-edit area — a plain, uncontrolled <textarea> while editing (Tab
+// inserts two spaces rather than moving focus, same as a real editor), a
+// syntax-highlighted read-only <pre> once saved (see lib/code-highlight.ts).
+// Local `local*` state mirrors what's on screen the instant a save fires,
+// rather than waiting on the router.refresh() a save always triggers too —
+// without it, switching back to the highlighted view would flash the old
+// (pre-edit) content for a moment.
+function CodeCard({
+  obj,
+  pending,
+  onChange,
+  onRemove,
+}: {
+  obj: TaskObject;
+  pending: boolean;
+  onChange: (code: string, language: string) => void;
+  onRemove: () => void;
+}) {
+  const savedCode = obj.content?.code ?? "";
+  const savedLanguage = obj.content?.language ?? "auto";
+  const [editing, setEditing] = useState(() => !savedCode);
+  const [localCode, setLocalCode] = useState(savedCode);
+  const [localLanguage, setLocalLanguage] = useState(savedLanguage);
+  const [copied, setCopied] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (!editing) {
+      setLocalCode(savedCode);
+      setLocalLanguage(savedLanguage);
+    }
+  }, [savedCode, savedLanguage, editing]);
+
+  function saveFromTextarea() {
+    const next = textareaRef.current?.value ?? localCode;
+    setLocalCode(next);
+    setEditing(false);
+    if (next !== savedCode || localLanguage !== savedLanguage) onChange(next, localLanguage);
+  }
+
+  function changeLanguage(next: string) {
+    const currentCode = editing ? textareaRef.current?.value ?? localCode : localCode;
+    setLocalCode(currentCode);
+    setLocalLanguage(next);
+    setEditing(false);
+    onChange(currentCode, next);
+  }
+
+  function handleTab(e: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key !== "Tab") return;
+    e.preventDefault();
+    const el = e.currentTarget;
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    el.value = el.value.slice(0, start) + "  " + el.value.slice(end);
+    el.selectionStart = el.selectionEnd = start + 2;
+  }
+
+  function copyCode() {
+    navigator.clipboard?.writeText(localCode).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
+  }
+
+  const { html, detected } = editing ? { html: "", detected: null } : highlightCode(localCode, localLanguage);
+
+  return (
+    <div className="obj-card">
+      <div className="obj-card-head">
+        <span className="obj-type-label">Code block</span>
+        <button className="icon-btn" onClick={onRemove} disabled={pending} title="Remove">
+          ✕
+        </button>
+      </div>
+      <div className="code-block-toolbar">
+        <select
+          className="select-input code-lang-select"
+          value={localLanguage}
+          disabled={pending}
+          onChange={(e) => changeLanguage(e.target.value)}
+        >
+          {CODE_LANGUAGES.map((l) => (
+            <option key={l.value} value={l.value}>
+              {l.label}
+            </option>
+          ))}
+        </select>
+        {!editing && localLanguage === "auto" && detected && <span className="code-detected">Detected: {detected}</span>}
+        {!editing && !!localCode && (
+          <button type="button" className="small-btn ghost-btn code-copy-btn" onClick={copyCode} disabled={pending}>
+            {copied ? "Copied" : "Copy"}
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <textarea
+          ref={textareaRef}
+          className="code-block-textarea"
+          defaultValue={localCode}
+          placeholder="Paste or type code…"
+          spellCheck={false}
+          onBlur={saveFromTextarea}
+          onKeyDown={handleTab}
+          autoFocus
+        />
+      ) : localCode ? (
+        <pre className="code-block-pre" onClick={() => setEditing(true)} title="Click to edit">
+          <code className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
+        </pre>
+      ) : (
+        <div className="code-block-empty" onClick={() => setEditing(true)}>
+          Click to add code…
+        </div>
+      )}
+    </div>
+  );
+}
+
+type SketchTool = "pen" | "eraser" | "circle" | "square" | "rectangle" | "right-triangle" | "triangle" | "hexagon";
+const SHAPE_TOOLS: SketchTool[] = ["circle", "square", "rectangle", "right-triangle", "triangle", "hexagon"];
+const DRAW_TOOLS: { id: SketchTool; label: string }[] = [
+  { id: "pen", label: "Pen" },
+  { id: "eraser", label: "Eraser" },
+  { id: "circle", label: "Circle" },
+  { id: "square", label: "Square" },
+  { id: "rectangle", label: "Rectangle" },
+  { id: "right-triangle", label: "Right-angle triangle" },
+  { id: "triangle", label: "Equilateral triangle" },
+  { id: "hexagon", label: "Hexagon" },
+];
+const SKETCH_COLORS = ["#2b2b2b", "#e03131", "#e8590c", "#2f9e44", "#1971c2", "#7048e8", "#d6336c", "#5c4033"];
+const SKETCH_PEN_WIDTH = 2.2;
+const SKETCH_ERASER_WIDTH = 18;
+
+function SketchToolIcon({ tool }: { tool: SketchTool }) {
+  const common = {
+    width: 14,
+    height: 14,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
+  switch (tool) {
+    case "pen":
+      return (
+        <svg {...common}>
+          <path d="M12 20h9" />
+          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+        </svg>
+      );
+    case "eraser":
+      return (
+        <svg {...common}>
+          <path d="m7 21-4.3-4.3c-.94-.94-.94-2.47 0-3.42l9.58-9.58c.94-.94 2.47-.94 3.42 0l5.3 5.3c.94.94.94 2.47 0 3.42L13 21" />
+          <path d="M22 21H7" />
+        </svg>
+      );
+    case "circle":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="8" />
+        </svg>
+      );
+    case "square":
+      return (
+        <svg {...common}>
+          <rect x="5" y="5" width="14" height="14" />
+        </svg>
+      );
+    case "rectangle":
+      return (
+        <svg {...common}>
+          <rect x="3" y="7" width="18" height="10" />
+        </svg>
+      );
+    case "right-triangle":
+      return (
+        <svg {...common}>
+          <path d="M5 5 L5 19 L19 19 Z" />
+        </svg>
+      );
+    case "triangle":
+      return (
+        <svg {...common}>
+          <path d="M12 4 L20 19 L4 19 Z" />
+        </svg>
+      );
+    case "hexagon":
+      return (
+        <svg {...common}>
+          <path d="M8 3 H16 L21 12 L16 21 H8 L3 12 Z" />
+        </svg>
+      );
+  }
+}
+
+// Draws (or previews, mid-drag) a shape tool into the given bounding box —
+// shared by both the live preview in handlePointerMove and, implicitly, the
+// final commit (the preview IS the commit: the last frame drawn before
+// pointerup is just left in place, nothing further to draw on release).
+function drawSketchShape(ctx: CanvasRenderingContext2D, tool: SketchTool, x0: number, y0: number, x1: number, y1: number, color: string) {
+  const left = Math.min(x0, x1);
+  const right = Math.max(x0, x1);
+  const top = Math.min(y0, y1);
+  const bottom = Math.max(y0, y1);
+  const w = right - left;
+  const h = bottom - top;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = SKETCH_PEN_WIDTH;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  switch (tool) {
+    case "circle": {
+      const cx = (left + right) / 2;
+      const cy = (top + bottom) / 2;
+      ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
+      break;
+    }
+    case "square": {
+      const size = Math.max(w, h);
+      const sx = x1 >= x0 ? x0 : x0 - size;
+      const sy = y1 >= y0 ? y0 : y0 - size;
+      ctx.rect(sx, sy, size, size);
+      break;
+    }
+    case "rectangle":
+      ctx.rect(left, top, w, h);
+      break;
+    case "right-triangle":
+      // Right angle at the bounding box's bottom-left corner.
+      ctx.moveTo(left, top);
+      ctx.lineTo(left, bottom);
+      ctx.lineTo(right, bottom);
+      ctx.closePath();
+      break;
+    case "triangle":
+      // Apex centered on top, base spans the full bounding-box width —
+      // reads as equilateral for the common case of dragging a roughly
+      // square box, without needing to force the box itself into one.
+      ctx.moveTo((left + right) / 2, top);
+      ctx.lineTo(left, bottom);
+      ctx.lineTo(right, bottom);
+      ctx.closePath();
+      break;
+    case "hexagon": {
+      const cx = (left + right) / 2;
+      const cy = (top + bottom) / 2;
+      const rx = w / 2;
+      const ry = h / 2;
+      for (let i = 0; i < 6; i++) {
+        const angle = (Math.PI / 180) * (60 * i - 90);
+        const px = cx + rx * Math.cos(angle);
+        const py = cy + ry * Math.sin(angle);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      break;
+    }
+  }
+  ctx.stroke();
+}
+
 // A React port of the prototype's raw-DOM initSketchCanvases(): pointer
 // events drawn straight onto a fixed 420x200 canvas, saved on every stroke
-// end. Drawing state (drawing/lastX/lastY) lives in refs, not state, so a
-// mid-stroke pointermove never triggers a re-render. "Clear sketch" reuses
-// the exact same save pathway with a blanked canvas rather than a separate
-// delete action, so Storage stays in sync with no new server action needed.
+// end. Drawing state (drawing/lastX/lastY/shapeStart) lives in refs, not
+// state, so a mid-stroke pointermove never triggers a re-render. "Clear
+// sketch" reuses the exact same save pathway with a blanked canvas rather
+// than a separate delete action, so Storage stays in sync with no new
+// server action needed.
+//
+// Beyond the original port: an eraser (destination-out compositing, so it
+// genuinely punches a hole back to whatever's underneath rather than
+// having to paint over in the exact background color), a basic color
+// palette, and six shape tools (drag to size, release to commit — a
+// snapshot of the canvas taken on pointerdown is restored on every
+// pointermove before redrawing the preview, so dragging a shape around
+// doesn't smear copies of it across the canvas).
+//
+// Also fixes a real, reported bug, not just adds features: freehand
+// strokes could drop line segments mid-stroke. Root cause was
+// onPointerLeave ending the stroke — with the canvas already holding
+// pointer capture (setPointerCapture below), a fast stroke briefly
+// crossing the canvas's own edge can still fire a pointerleave in some
+// browsers even though the capture means pointermove/pointerup keep
+// arriving correctly; ending the stroke right then silently drew nothing
+// for the rest of that same physical drag. Removed — only a genuine
+// pointerup/pointercancel ends a stroke now. Separately, a very fast
+// stroke can generate more physical mouse-movement than individual
+// pointermove events for — most browsers batch ("coalesce") the skipped
+// points into the next event rather than dropping them outright, but the
+// original code only ever drew a line to the event's own final point, so
+// those in-between points, and the line segments through them, never got
+// drawn. getCoalescedEvents() (guarded, since it's not universally
+// implemented) recovers and draws through all of them.
 function SketchCard({
   file,
   pending,
@@ -317,6 +629,9 @@ function SketchCard({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
   const last = useRef({ x: 0, y: 0 });
+  const shapeStart = useRef<{ x: number; y: number; snapshot: ImageData } | null>(null);
+  const [tool, setTool] = useState<SketchTool>("pen");
+  const [color, setColor] = useState(SKETCH_COLORS[0]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -337,7 +652,7 @@ function SketchCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file?.url]);
 
-  function pos(e: ReactPointerEvent<HTMLCanvasElement>) {
+  function pos(e: ReactPointerEvent<HTMLCanvasElement> | PointerEvent) {
     const canvas = canvasRef.current as HTMLCanvasElement;
     const r = canvas.getBoundingClientRect();
     return { x: (e.clientX - r.left) * (canvas.width / r.width), y: (e.clientY - r.top) * (canvas.height / r.height) };
@@ -350,17 +665,24 @@ function SketchCard({
     drawing.current = true;
     canvas.setPointerCapture(e.pointerId);
     const p = pos(e);
-    last.current = p;
-    ctx.strokeStyle = "#2b2b2b";
-    ctx.lineWidth = 2.2;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    // A dot on its own so a single tap/click registers as a mark, not
-    // nothing — matches the prototype's own pointerdown handler.
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, ctx.lineWidth / 2, 0, Math.PI * 2);
-    ctx.fillStyle = ctx.strokeStyle;
-    ctx.fill();
+
+    if (tool === "pen" || tool === "eraser") {
+      last.current = p;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = tool === "eraser" ? SKETCH_ERASER_WIDTH : SKETCH_PEN_WIDTH;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.globalCompositeOperation = tool === "eraser" ? "destination-out" : "source-over";
+      // A dot on its own so a single tap/click registers as a mark, not
+      // nothing — matches the prototype's own pointerdown handler.
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, ctx.lineWidth / 2, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    } else {
+      ctx.globalCompositeOperation = "source-over";
+      shapeStart.current = { x: p.x, y: p.y, snapshot: ctx.getImageData(0, 0, canvas.width, canvas.height) };
+    }
   }
 
   function handlePointerMove(e: ReactPointerEvent<HTMLCanvasElement>) {
@@ -368,12 +690,23 @@ function SketchCard({
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) return;
-    const p = pos(e);
-    ctx.beginPath();
-    ctx.moveTo(last.current.x, last.current.y);
-    ctx.lineTo(p.x, p.y);
-    ctx.stroke();
-    last.current = p;
+
+    if (tool === "pen" || tool === "eraser") {
+      const native = e.nativeEvent as PointerEvent & { getCoalescedEvents?: () => PointerEvent[] };
+      const points = native.getCoalescedEvents?.() ?? [native];
+      for (const point of points) {
+        const p = pos(point);
+        ctx.beginPath();
+        ctx.moveTo(last.current.x, last.current.y);
+        ctx.lineTo(p.x, p.y);
+        ctx.stroke();
+        last.current = p;
+      }
+    } else if (shapeStart.current) {
+      ctx.putImageData(shapeStart.current.snapshot, 0, 0);
+      const p = pos(e);
+      drawSketchShape(ctx, tool, shapeStart.current.x, shapeStart.current.y, p.x, p.y, color);
+    }
   }
 
   function saveCanvas() {
@@ -390,6 +723,7 @@ function SketchCard({
   function endStroke() {
     if (!drawing.current) return;
     drawing.current = false;
+    shapeStart.current = null;
     saveCanvas();
   }
 
@@ -397,6 +731,7 @@ function SketchCard({
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) return;
+    ctx.globalCompositeOperation = "source-over";
     ctx.fillStyle = "#FBFAF7";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     saveCanvas();
@@ -410,6 +745,42 @@ function SketchCard({
           ✕
         </button>
       </div>
+      <div className="sketch-toolbar">
+        {DRAW_TOOLS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={`sketch-tool-btn ${tool === t.id ? "active" : ""}`}
+            onClick={() => setTool(t.id)}
+            title={t.label}
+            aria-label={t.label}
+          >
+            <SketchToolIcon tool={t.id} />
+          </button>
+        ))}
+        <span className="sketch-toolbar-divider" />
+        <div className="sketch-colors">
+          {SKETCH_COLORS.map((c) => (
+            <button
+              key={c}
+              type="button"
+              className={`sketch-color-swatch ${color === c ? "active" : ""}`}
+              style={{ background: c }}
+              onClick={() => setColor(c)}
+              title={c}
+              aria-label={`Color ${c}`}
+            />
+          ))}
+          <input
+            type="color"
+            className="sketch-color-custom"
+            value={color}
+            onChange={(e) => setColor(e.target.value)}
+            title="Custom color"
+            aria-label="Custom color"
+          />
+        </div>
+      </div>
       <div className="sketch-frame">
         <canvas
           ref={canvasRef}
@@ -419,7 +790,6 @@ function SketchCard({
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={endStroke}
-          onPointerLeave={endStroke}
           onPointerCancel={endStroke}
         />
       </div>

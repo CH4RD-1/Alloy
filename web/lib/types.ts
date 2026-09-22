@@ -287,7 +287,7 @@ export interface Doc {
 // the task panel doesn't render an existing form-kind object's answers yet
 // (it falls back to the generic "not supported" stub) — a real, separate
 // gap from file/sketch, not part of this pass.
-export type TaskObjectKind = "note" | "file" | "sketch" | "checklist" | "form";
+export type TaskObjectKind = "note" | "file" | "sketch" | "checklist" | "form" | "code";
 
 export interface TaskObject {
   id: string;
@@ -295,7 +295,12 @@ export interface TaskObject {
   task_id: string;
   kind: TaskObjectKind;
   position: number;
-  content: { text?: string } | null;
+  // "code" stores both fields here rather than getting its own table —
+  // same reasoning as "note"'s plain { text }: no file storage needed, so
+  // this generic jsonb column is enough. `language` is either a specific
+  // highlight.js language key or "auto" (detect on render — see
+  // lib/code-highlight.ts).
+  content: { text?: string; code?: string; language?: string } | null;
   created_by: string | null;
   created_at: string;
 }

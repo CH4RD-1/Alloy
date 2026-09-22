@@ -479,7 +479,7 @@ export async function unlinkDocFromTask(docId: string, taskId: string) {
 // that one's created only through the Portal's submitPortalRequest flow.
 // ----------------------------------------------------------------------
 
-export async function createTaskObject(orgId: string, taskId: string, kind: "note" | "checklist" | "sketch"): Promise<string> {
+export async function createTaskObject(orgId: string, taskId: string, kind: "note" | "checklist" | "sketch" | "code"): Promise<string> {
   const { supabase, user } = await requireUser();
   const { data: existing } = await supabase
     .from("task_objects")
@@ -489,6 +489,13 @@ export async function createTaskObject(orgId: string, taskId: string, kind: "not
     .limit(1);
   const nextPosition = existing && existing.length ? existing[0].position + 1 : 0;
 
+  // A sketch's canvas starts blank with nothing saved yet — its real state
+  // lives elsewhere (task_object_files once a stroke is saved), not in
+  // this generic content column. Same idea for checklist (own child rows).
+  let content: { text: string } | { code: string; language: string } | null = null;
+  if (kind === "note") content = { text: "" };
+  else if (kind === "code") content = { code: "", language: "auto" };
+
   const { data, error } = await supabase
     .from("task_objects")
     .insert({
@@ -496,10 +503,7 @@ export async function createTaskObject(orgId: string, taskId: string, kind: "not
       task_id: taskId,
       kind,
       position: nextPosition,
-      // A sketch's canvas starts blank with nothing saved yet — same as a
-      // checklist, its real state lives elsewhere (task_object_files once a
-      // stroke is saved), not in this generic content column.
-      content: kind === "note" ? { text: "" } : null,
+      content,
       created_by: user.id,
     })
     .select("id")
@@ -512,6 +516,13 @@ export async function createTaskObject(orgId: string, taskId: string, kind: "not
 export async function updateNoteText(objectId: string, text: string) {
   const { supabase } = await requireUser();
   const { error } = await supabase.from("task_objects").update({ content: { text } }).eq("id", objectId);
+  if (error) throw new Error(error.message);
+  revalidatePath("/dashboard");
+}
+
+export async function updateCodeBlock(objectId: string, code: string, language: string) {
+  const { supabase } = await requireUser();
+  const { error } = await supabase.from("task_objects").update({ content: { code, language } }).eq("id", objectId);
   if (error) throw new Error(error.message);
   revalidatePath("/dashboard");
 }
