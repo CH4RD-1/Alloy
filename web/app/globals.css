@@ -513,13 +513,15 @@ html {
 }
 /* Doc/article side panel — a second, independent slide-over from the main
    .panel above (task/asset/etc.), always double-width, ported from the
-   prototype's own #panelArticle. When a main panel is also open (see
-   DocPanel's besideMain prop, driven by tasks-workspace.tsx's selectedTaskId)
-   it offsets to tuck in just left of that panel's default 440px width
-   instead of overlapping it, so a task and a knowledge-base article it
-   links to stay visible side by side — the prototype's own hardcoded
-   440px offset, not aware of this port's own maximize toggle above, so a
-   manually-widened main panel is a known edge case this doesn't chase. */
+   prototype's own #panelArticle. When a main panel is also open, it offsets
+   to tuck in just left of that panel's *actual* current width instead of
+   overlapping it, so a task and a knowledge-base article it links to stay
+   visible side by side — DocPanel's besideMainWidth prop carries that real
+   pixel width (tracked in tasks-workspace.tsx via TaskPanel's
+   onWidthChange) and is applied as an inline `right` style, since it can
+   now be either 440px or 880px depending on whether the task panel is a
+   widened Helpdesk ticket. The 440px below is only a fallback for the rare
+   case besideMainWidth is set without a concrete width. */
 .panel-doc {
   width: 880px;
   transition: transform 0.18s ease, right 0.18s ease;

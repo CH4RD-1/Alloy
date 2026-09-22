@@ -89,6 +89,7 @@ export function TaskPanel({
   assets,
   onOpenAsset,
   onSelectDoc,
+  onWidthChange,
   onClose,
 }: {
   taskId: string;
@@ -122,6 +123,11 @@ export function TaskPanel({
   // .panel-doc in globals.css) without closing this task's panel — omit to
   // fall back to a non-clickable row.
   onSelectDoc?: (docId: string) => void;
+  // Reports this panel's actual on-screen width in px (440 normal, 880
+  // widened) every time it changes, so the parent can keep a stacked
+  // DocPanel's own offset in sync instead of assuming a fixed 440px — see
+  // .panel-doc's own comment in globals.css for the bug this fixes.
+  onWidthChange?: (widthPx: number) => void;
   onClose: () => void;
 }) {
   const router = useRouter();
@@ -131,16 +137,29 @@ export function TaskPanel({
   const [linkType, setLinkType] = useState<"blocked" | "concurrent" | "related" | "clone">("blocked");
   const [docTargetId, setDocTargetId] = useState("");
   const [error, setError] = useState<string | null>(null);
-  // Maximize toggle (see the '<' chevron in panel-head below) — cycles
-  // normal (440px, the .panel default) -> double-width -> full-screen and
-  // back, for tickets whose Conversation thread runs long. Only rendered on
-  // this main panel; the Asset Allocation panel below is deliberately kept
-  // minimal and doesn't get one.
-  const [panelWidth, setPanelWidth] = useState<"normal" | "double" | "full">("normal");
+  // Maximize toggle (see the '<'/'>' chevron in panel-head below) — toggles
+  // between normal (440px, the .panel default) and double-width, for a
+  // Helpdesk ticket's Conversation thread when it runs long. Helpdesk-only:
+  // a regular task's panel never gets the button at all (see
+  // effectiveWidth below, which also excludes the Asset Allocation panel —
+  // that one's deliberately kept minimal and never gets a toggle either).
+  const [panelWidth, setPanelWidth] = useState<"normal" | "double">("normal");
 
   const row = allRows.find((r) => r.task.id === taskId);
-  if (!row) return null;
-  const task = row.task;
+  const task = row?.task;
+  const project = task ? projects.find((p) => p.id === task.project_id) : undefined;
+  const isWidenable = !!project?.is_helpdesk && task?.kind !== "asset_allocation";
+  const effectiveWidth = isWidenable ? panelWidth : "normal";
+
+  // Reports the actual rendered width upward on every change (including
+  // the very first render) so a DocPanel stacked beside this one — see
+  // .panel-doc in globals.css — can offset itself correctly instead of
+  // assuming this panel is always 440px.
+  useEffect(() => {
+    onWidthChange?.(effectiveWidth === "double" ? 880 : 440);
+  }, [effectiveWidth, onWidthChange]);
+
+  if (!row || !task) return null;
 
   if (task.kind === "asset_allocation") {
     return (
@@ -169,7 +188,6 @@ export function TaskPanel({
     });
   }
 
-  const project = projects.find((p) => p.id === task.project_id);
   const projectTeams = teams.filter((t) => t.project_id === task.project_id);
   const outgoing = transitions.filter((t) => t.from_status_id === task.status_id);
   const canMove = (t: WorkflowTransition) =>
@@ -214,7 +232,7 @@ export function TaskPanel({
   return (
     <>
       <div className="scrim show" onClick={onClose} />
-      <aside className={"panel show" + (panelWidth === "double" ? " panel-double" : panelWidth === "full" ? " panel-full" : "")}>
+      <aside className={"panel show" + (effectiveWidth === "double" ? " panel-double" : "")}>
         <div className="panel-head">
           <div style={{ flex: 1, minWidth: 0 }}>
             <input
@@ -231,20 +249,16 @@ export function TaskPanel({
               {row.teamName ? ` · ${row.teamName}` : ""}
             </div>
           </div>
-          <button
-            className="icon-btn"
-            onClick={() => setPanelWidth((w) => (w === "normal" ? "double" : w === "double" ? "full" : "normal"))}
-            aria-label={panelWidth === "full" ? "Restore panel width" : "Widen panel"}
-            title={
-              panelWidth === "normal"
-                ? "Widen to double width — handy for a long ticket Conversation"
-                : panelWidth === "double"
-                ? "Expand to full screen"
-                : "Restore to normal width"
-            }
-          >
-            {panelWidth === "full" ? "›" : "‹"}
-          </button>
+          {isWidenable && (
+            <button
+              className="icon-btn"
+              onClick={() => setPanelWidth((w) => (w === "normal" ? "double" : "normal"))}
+              aria-label={panelWidth === "double" ? "Restore panel width" : "Widen panel"}
+              title={panelWidth === "double" ? "Restore to normal width" : "Widen to double width — handy for a long ticket Conversation"}
+            >
+              {panelWidth === "double" ? "›" : "‹"}
+            </button>
+          )}
           <button className="icon-btn panel-close" onClick={onClose} aria-label="Close">
             ✕
           </button>

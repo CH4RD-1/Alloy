@@ -25,7 +25,7 @@ export function DocPanel({
   allRows,
   linkedTaskIds,
   vocabTask,
-  besideMain,
+  besideMainWidth,
   onSelectTask,
   onClose,
 }: {
@@ -33,11 +33,14 @@ export function DocPanel({
   allRows: TaskRow[]; // flattened: every task, top-level and sub (see flattenRows)
   linkedTaskIds: string[];
   vocabTask: string;
-  // True while the main task panel is also open — ported from the
-  // prototype's #panelArticle "beside-main" treatment (see .panel-doc in
-  // globals.css): offsets this panel to sit just left of the task panel's
-  // default width instead of overlapping it.
-  besideMain?: boolean;
+  // The main task panel's own current on-screen width (px) while it's also
+  // open — undefined/0 when it isn't. Ported from the prototype's
+  // #panelArticle "beside-main" treatment (see .panel-doc in globals.css),
+  // but driven by the task panel's *actual* width (tracked in
+  // tasks-workspace.tsx via TaskPanel's onWidthChange) rather than a
+  // hardcoded 440px, so a widened Helpdesk ticket's panel doesn't end up
+  // hidden behind this one.
+  besideMainWidth?: number;
   // Opens the linked task's own panel without closing this one, so a task
   // and the article it links to can stay open side by side — omit to fall
   // back to a non-clickable row (used nowhere currently, but keeps this
@@ -124,7 +127,7 @@ export function DocPanel({
   return (
     <>
       <div className="scrim show" onClick={onClose} />
-      <aside className={`panel show panel-doc${besideMain ? " beside-main" : ""}`}>
+      <aside className={`panel show panel-doc${besideMainWidth ? " beside-main" : ""}`} style={besideMainWidth ? { right: besideMainWidth } : undefined}>
         <div className="panel-head">
           <div style={{ flex: 1, minWidth: 0 }}>
             <input

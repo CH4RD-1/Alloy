@@ -200,6 +200,12 @@ export function TasksWorkspace({
   // of jumping straight to the full task panel on a plain click.
   const [previewTask, setPreviewTask] = useState<{ taskId: string; x: number; y: number } | null>(null);
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
+  // The task panel's own actual on-screen width (440 normal, 880 widened —
+  // only ever 880 for a Helpdesk ticket, see task-panel.tsx's isWidenable),
+  // reported up via TaskPanel's onWidthChange so a stacked DocPanel can
+  // offset itself correctly instead of assuming a fixed 440px (see
+  // .panel-doc's own comment in globals.css for the bug this replaces).
+  const [mainPanelWidthPx, setMainPanelWidthPx] = useState(440);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [managingForms, setManagingForms] = useState(false);
@@ -450,6 +456,7 @@ export function TasksWorkspace({
             setSelectedAssetId(assetId);
           }}
           onSelectDoc={setSelectedDocId}
+          onWidthChange={setMainPanelWidthPx}
           onClose={() => setSelectedTaskId(null)}
         />
       )}
@@ -467,8 +474,11 @@ export function TasksWorkspace({
               // Stacks beside the task panel (double-width, ported from the
               // prototype's #panelArticle) rather than replacing it, since
               // opening a linked article shouldn't lose the task you opened
-              // it from — see DocPanel's besideMain prop.
-              besideMain={!!selectedTaskId}
+              // it from — see DocPanel's besideMainWidth prop. Passes the
+              // task panel's own *actual* current width (tracked above via
+              // onWidthChange) rather than assuming it's always 440px, so a
+              // widened Helpdesk ticket doesn't end up hidden behind this.
+              besideMainWidth={selectedTaskId ? mainPanelWidthPx : undefined}
               onSelectTask={setSelectedTaskId}
               onClose={() => setSelectedDocId(null)}
             />
