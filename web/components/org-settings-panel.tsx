@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useState, useTransition, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import type { Role, SubscriptionStatus } from "@/lib/types";
 import { updateOrgDomain, toggleTeamAllocation } from "@/lib/actions";
+import { createClient } from "@/lib/supabase/client";
 import { createCheckoutSession, createBillingPortalSession } from "@/lib/billing";
 
 // New with custom subdomains (Phase 3): the first panel that's about the
@@ -46,6 +47,36 @@ export function OrgSettingsPanel({
   // so a slow Stripe redirect doesn't also disable the domain Save button.
   const [billingPending, setBillingPending] = useState(false);
   const [billingError, setBillingError] = useState<string | null>(null);
+
+  // Your account — sets/changes the signed-in user's own Supabase Auth
+  // password, independent of everything else on this panel (which is all
+  // about the org, not the user). Added alongside password sign-in on
+  // /login and /signup (see those files' own comments) so an account that
+  // only ever signed up via magic link has a way to opt into password
+  // login too, without needing a fresh signup. supabase.auth.updateUser is
+  // a plain client-side Supabase Auth call, not a server action — it
+  // operates on whatever session is already active in this browser, so it
+  // doesn't go through run()/router.refresh() like the org fields below.
+  const [newPassword, setNewPassword] = useState("");
+  const [accountPending, setAccountPending] = useState(false);
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [accountSuccess, setAccountSuccess] = useState(false);
+
+  async function handleSetPassword(e: FormEvent) {
+    e.preventDefault();
+    setAccountError(null);
+    setAccountSuccess(false);
+    setAccountPending(true);
+    const supabase = createClient();
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    setAccountPending(false);
+    if (error) {
+      setAccountError(error.message);
+      return;
+    }
+    setNewPassword("");
+    setAccountSuccess(true);
+  }
 
   // window.location.origin is only known client-side — computed after mount
   // rather than read directly during render, so the server-rendered and
@@ -101,6 +132,40 @@ export function OrgSettingsPanel({
         </div>
         <div className="panel-body">
           {error && <div className="banner" style={{ color: "var(--blocked)", background: "var(--blocked-bg)" }}>{error}</div>}
+
+          <div className="field-group">
+            <span className="field-label">Your account</span>
+            <p style={{ color: "var(--text-faint)", fontSize: 12, marginBottom: 8 }}>
+              This is about your own sign-in, not {orgName}. Set a password here to sign in at{" "}
+              <code style={{ fontSize: 11.5 }}>/login</code> without waiting on a magic-link email — handy if email
+              delivery is ever slow, rate-limited, or misconfigured.
+            </p>
+            {accountError && (
+              <div className="banner" style={{ color: "var(--blocked)", background: "var(--blocked-bg)", marginBottom: 8 }}>
+                {accountError}
+              </div>
+            )}
+            {accountSuccess && (
+              <div className="banner" style={{ marginBottom: 8 }}>Password set — you can now sign in with it anytime.</div>
+            )}
+            <form onSubmit={handleSetPassword} className="add-inline">
+              <input
+                type="password"
+                required
+                minLength={6}
+                className="text-input"
+                style={{ flex: 1 }}
+                placeholder="New password (min. 6 characters)"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+              />
+              <button type="submit" className="small-btn" disabled={accountPending || newPassword.length < 6}>
+                {accountPending ? "Saving…" : "Save"}
+              </button>
+            </form>
+          </div>
+
+          <div className="divider" />
 
           <div className="field-group">
             <span className="field-label">{orgName}</span>
