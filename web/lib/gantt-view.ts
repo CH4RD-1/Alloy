@@ -24,12 +24,24 @@ export interface GanttRow {
 // Helpdesk-project tasks are unscheduled and never appear on the Gantt (see
 // isHelpdeskProject/taskUnscheduled in the prototype) — even a task that
 // would otherwise be expanded/visible is dropped along with its project.
+//
+// Top-level rows are sorted by task.position — the Gantt's own manual
+// up/down reorder (see reorderGanttTasks in lib/actions.ts and
+// task_position.sql's header) — rather than left in whatever order `rows`
+// arrived in. Nothing else reads this field: List/Buckets/Calendar keep
+// their existing sort untouched. Array.prototype.sort is stable in every
+// engine this runs on, so untouched rows (position still the 0 default)
+// keep their incoming relative order instead of jumbling. Subtasks are
+// never reordered independently — they stay in whatever order their
+// parent's own children array already gives them.
 export function buildGanttRows(params: { rows: TaskRow[]; projects: Project[]; expanded: Set<string> }): GanttRow[] {
   const { rows, projects, expanded } = params;
   const helpdeskProjectIds = new Set(projects.filter((p) => p.is_helpdesk).map((p) => p.id));
+  const visible = rows
+    .filter((r) => !helpdeskProjectIds.has(r.task.project_id))
+    .sort((a, b) => a.task.position - b.task.position);
   const out: GanttRow[] = [];
-  rows.forEach((r) => {
-    if (helpdeskProjectIds.has(r.task.project_id)) return;
+  visible.forEach((r) => {
     out.push({ row: r, sub: false });
     if (expanded.has(r.task.id)) {
       (r.children ?? []).forEach((c) => out.push({ row: c, sub: true }));

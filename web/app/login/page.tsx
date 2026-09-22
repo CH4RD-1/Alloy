@@ -119,7 +119,7 @@ export default function LoginPage() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@company.com"
-              className="w-full rounded-md border border-graphite-300 px-3 py-2"
+              className="w-full rounded-md border border-graphite-300 bg-white px-3 py-2 text-graphite-900"
             />
             <button
               type="submit"
@@ -145,7 +145,7 @@ export default function LoginPage() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="you@company.com"
-            className="w-full rounded-md border border-graphite-300 px-3 py-2"
+            className="w-full rounded-md border border-graphite-300 bg-white px-3 py-2 text-graphite-900"
           />
           <input
             type="password"
@@ -153,7 +153,7 @@ export default function LoginPage() {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="Password"
-            className="w-full rounded-md border border-graphite-300 px-3 py-2"
+            className="w-full rounded-md border border-graphite-300 bg-white px-3 py-2 text-graphite-900"
           />
           <button
             type="submit"

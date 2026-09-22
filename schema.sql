@@ -422,7 +422,12 @@ create table tasks (
 
   created_by          uuid references users(id) on delete set null,     -- null if created by an external contact
   created_at          timestamptz not null default now(),
-  updated_at          timestamptz not null default now()
+  updated_at          timestamptz not null default now(),
+
+  -- Manual Gantt ordering only — see task_position.sql's own header for the
+  -- full rationale. Every other view (List, Buckets, Calendar) keeps its
+  -- existing created_at-based sort and never reads this column.
+  position            int not null default 0
 );
 
 create index on tasks (org_id);

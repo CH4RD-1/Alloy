@@ -14,7 +14,7 @@ import {
   cloneTargetTaskId,
 } from "@/lib/assets-view";
 import { AssetIcon } from "@/components/asset-icon";
-import { updateAssetFields, deleteAsset, updateProjectFields, allocateAsset } from "@/lib/actions";
+import { updateAssetFields, deleteAsset, enableProjectAllocations, allocateAsset } from "@/lib/actions";
 
 // Ported from the prototype's renderAssetPanel()/renderAllocatePanel() — a
 // full edit surface for one asset (fields save immediately, same pattern as
@@ -296,9 +296,9 @@ function AllocatePanel({
           {error && <div className="banner" style={{ color: "var(--blocked)", background: "var(--blocked-bg)" }}>{error}</div>}
 
           {allocatable.length === 0 && (
-            <div className="banner">
-              No project has allocations enabled yet — pick one below to turn it on, then come back to this screen.
-              <div className="add-inline" style={{ marginTop: 8 }}>
+            <div className="banner" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
+              <span>No project has allocations enabled yet — pick one below to turn it on, then come back to this screen.</span>
+              <div className="add-inline" style={{ marginTop: 0 }}>
                 <select className="select-input" value={enableProjectId} onChange={(e) => setEnableProjectId(e.target.value)}>
                   {projects.map((p) => (
                     <option key={p.id} value={p.id}>
@@ -309,7 +309,7 @@ function AllocatePanel({
                 <button
                   className="small-btn"
                   disabled={!enableProjectId || pending}
-                  onClick={() => run(() => updateProjectFields(enableProjectId, { enable_allocations: true }))}
+                  onClick={() => run(() => enableProjectAllocations(orgId, enableProjectId))}
                 >
                   Enable allocations
                 </button>

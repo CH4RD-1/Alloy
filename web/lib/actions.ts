@@ -407,6 +407,23 @@ export async function updateTaskSchedule(orgId: string, taskId: string, start: s
   return changes.size;
 }
 
+// Rewrites a set of top-level tasks' Gantt-only position 0..n-1 in one
+// shot — the Gantt view's up/down row-reorder buttons call this with the
+// currently-visible row order after swapping one task with its neighbor
+// (see moveTaskRow in components/gantt-view.tsx), mirroring
+// reorderWorkflowStatuses's own wholesale-rewrite approach rather than
+// juggling one row's position at a time. See task_position.sql's header
+// for why this column exists and why only the Gantt view reads it.
+export async function reorderGanttTasks(orgId: string, orderedTaskIds: string[]) {
+  const { supabase } = await requireUser();
+  await Promise.all(
+    orderedTaskIds.map((id, position) =>
+      supabase.from("tasks").update({ position }).eq("id", id).eq("org_id", orgId)
+    )
+  );
+  revalidatePath("/dashboard");
+}
+
 
 // ----------------------------------------------------------------------
 // Knowledge base (docs)
@@ -1432,6 +1449,46 @@ export async function updateProjectFields(
     if (error.code === "23505") throw new Error(`Another project in this org already uses the tag "${cleanPatch.tag}".`);
     throw new Error(error.message);
   }
+  revalidatePath("/dashboard");
+}
+
+// Turns on allocations for a project AND guarantees it ends up with a valid
+// asset_workflow_id in the same step — used by the Allocate panel's inline
+// "Enable allocations" quick-action (components/asset-panel.tsx), which
+// only ever wants a project to walk away allocatable, not to land back on
+// "no asset workflow configured" the moment it tries to actually allocate.
+// (Manage Projects' own checkbox+dropdown, in projects-panel.tsx, still
+// lets someone deliberately pick a *different* asset workflow afterward —
+// this just picks a sane default so the quick-action never dead-ends.)
+export async function enableProjectAllocations(orgId: string, projectId: string) {
+  const { supabase } = await requireUser();
+
+  const { data: project, error: fetchError } = await supabase
+    .from("projects")
+    .select("id, asset_workflow_id")
+    .eq("id", projectId)
+    .eq("org_id", orgId)
+    .maybeSingle();
+  if (fetchError) throw new Error(fetchError.message);
+  if (!project) throw new Error("That project no longer exists.");
+
+  const patch: { enable_allocations: boolean; asset_workflow_id?: string } = { enable_allocations: true };
+
+  if (!project.asset_workflow_id) {
+    const { data: assetWorkflow } = await supabase
+      .from("workflows")
+      .select("id")
+      .eq("org_id", orgId)
+      .eq("type", "asset")
+      .order("created_at")
+      .limit(1)
+      .maybeSingle();
+    if (!assetWorkflow) throw new Error("This organization has no asset workflow set up yet.");
+    patch.asset_workflow_id = assetWorkflow.id as string;
+  }
+
+  const { error } = await supabase.from("projects").update(patch).eq("id", projectId);
+  if (error) throw new Error(error.message);
   revalidatePath("/dashboard");
 }
 

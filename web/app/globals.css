@@ -1010,6 +1010,34 @@ textarea.text-input {
 .gantt-label-row .row-title {
   font-size: 12px;
 }
+.gantt-reorder-btns {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 1px;
+  margin-left: auto;
+}
+.gantt-reorder-btn {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.gantt-reorder-btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.gantt-reorder-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
 .gantt-header-spacer {
   height: 40px;
   border-bottom: 1px solid var(--border);

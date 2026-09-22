@@ -133,7 +133,7 @@ export default function SignupPage() {
               value={orgName}
               onChange={(e) => setOrgName(e.target.value)}
               placeholder="Acme Inc."
-              className="w-full rounded-md border border-graphite-300 px-3 py-2"
+              className="w-full rounded-md border border-graphite-300 bg-white px-3 py-2 text-graphite-900"
             />
           </div>
 
@@ -170,7 +170,7 @@ export default function SignupPage() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@company.com"
-              className="w-full rounded-md border border-graphite-300 px-3 py-2"
+              className="w-full rounded-md border border-graphite-300 bg-white px-3 py-2 text-graphite-900"
             />
           </div>
 
@@ -184,7 +184,7 @@ export default function SignupPage() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="At least 6 characters"
-                className="w-full rounded-md border border-graphite-300 px-3 py-2"
+                className="w-full rounded-md border border-graphite-300 bg-white px-3 py-2 text-graphite-900"
               />
             </div>
           )}

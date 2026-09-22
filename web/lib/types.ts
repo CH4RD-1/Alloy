@@ -183,6 +183,11 @@ export interface Task {
   created_by: string | null;
   created_at: string;
   updated_at: string;
+  // Manual Gantt ordering only (see lib/gantt-view.ts's buildGanttRows) —
+  // every other view keeps its own existing sort and ignores this. Default
+  // 0 for anything created before this column existed; the Gantt's own
+  // up/down arrows are what assign real, distinct values from then on.
+  position: number;
 }
 
 export interface TaskLink {

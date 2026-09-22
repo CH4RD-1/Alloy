@@ -6,7 +6,7 @@ import type { TaskRow } from "@/lib/list-view";
 import type { Project, TaskLink, LinkType } from "@/lib/types";
 import { buildConnectors, buildGanttRows, computeGanttLayout, LINK_DX, LINK_DY, type Geom, type GanttLayout } from "@/lib/gantt-view";
 import { addDays, daysBetween } from "@/lib/gantt-schedule";
-import { autoArrangeSchedule, updateTaskSchedule, addLink, removeLink } from "@/lib/actions";
+import { autoArrangeSchedule, updateTaskSchedule, addLink, removeLink, reorderGanttTasks } from "@/lib/actions";
 
 function ChevronIcon({ open }: { open: boolean }) {
   return (
@@ -20,6 +20,27 @@ function ChevronIcon({ open }: { open: boolean }) {
       strokeLinecap="round"
       strokeLinejoin="round"
       style={{ transform: open ? "rotate(90deg)" : undefined, transition: "transform .12s" }}
+    >
+      <path d="M9 6l6 6-6 6" />
+    </svg>
+  );
+}
+
+// Up/down row-reorder glyphs — the same chevron path as ChevronIcon above,
+// just rotated, so the two read as one consistent icon family rather than
+// mixing in a different arrow style.
+function CaretIcon({ direction }: { direction: "up" | "down" }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="10"
+      height="10"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ transform: direction === "up" ? "rotate(-90deg)" : "rotate(90deg)" }}
     >
       <path d="M9 6l6 6-6 6" />
     </svg>
@@ -308,6 +329,37 @@ export function GanttView({
     [orgId, router, startTransition]
   );
 
+  // Manual reorder — only top-level rows are ever swapped (a subtask stays
+  // wherever its parent's own children array puts it); moving the first row
+  // up or the last row down is a no-op via the bounds check below, which is
+  // also what disables the corresponding arrow in the render. Rewrites the
+  // *whole* currently-visible top-level order in one call (reorderGanttTasks
+  // in lib/actions.ts), mirroring reorderWorkflowStatuses's wholesale
+  // approach, rather than trying to swap just two rows' position values —
+  // simpler, and self-healing for any rows still sitting on the 0 default.
+  const topLevelIds = useMemo(() => ganttRows.filter((r) => !r.sub).map((r) => r.row.task.id), [ganttRows]);
+
+  const moveTaskRow = useCallback(
+    (taskId: string, direction: "up" | "down") => {
+      const idx = topLevelIds.indexOf(taskId);
+      if (idx === -1) return;
+      const swapWith = direction === "up" ? idx - 1 : idx + 1;
+      if (swapWith < 0 || swapWith >= topLevelIds.length) return;
+      const next = [...topLevelIds];
+      [next[idx], next[swapWith]] = [next[swapWith], next[idx]];
+      setError(null);
+      startTransition(async () => {
+        try {
+          await reorderGanttTasks(orgId, next);
+          router.refresh();
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Couldn't reorder that row.");
+        }
+      });
+    },
+    [topLevelIds, orgId, router, startTransition]
+  );
+
   // ---- drag to move / resize -------------------------------------------------
   function handleBarMouseDown(e: React.MouseEvent, taskId: string, mode: "move" | "resize-left" | "resize-right", origStart: string | null, origDue: string | null, isMilestone: boolean) {
     if (e.button !== 0) return;
@@ -592,6 +644,30 @@ export function GanttView({
                   <span className="row-title" title={r.row.task.title}>
                     {r.row.task.title}
                   </span>
+                  {!r.sub && topLevelIds.length > 1 && (
+                    <span className="gantt-reorder-btns" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        className="gantt-reorder-btn"
+                        disabled={pending || topLevelIds.indexOf(r.row.task.id) === 0}
+                        onClick={() => moveTaskRow(r.row.task.id, "up")}
+                        aria-label="Move up"
+                        title="Move up"
+                      >
+                        <CaretIcon direction="up" />
+                      </button>
+                      <button
+                        type="button"
+                        className="gantt-reorder-btn"
+                        disabled={pending || topLevelIds.indexOf(r.row.task.id) === topLevelIds.length - 1}
+                        onClick={() => moveTaskRow(r.row.task.id, "down")}
+                        aria-label="Move down"
+                        title="Move down"
+                      >
+                        <CaretIcon direction="down" />
+                      </button>
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
