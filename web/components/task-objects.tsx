@@ -8,6 +8,7 @@ import {
   createTaskObject,
   createFileTaskObject,
   saveSketchImage,
+  saveSketchAsImage,
   updateNoteText,
   updateCodeBlock,
   deleteTaskObject,
@@ -142,6 +143,7 @@ export function TaskObjects({
                   pending={pending}
                   onRemove={() => run(() => deleteTaskObject(o.id))}
                   onSaved={(formData) => run(() => saveSketchImage(orgId, taskId, o.id, formData))}
+                  onSaveAsImage={(formData) => run(() => saveSketchAsImage(orgId, taskId, o.id, formData))}
                 />
               );
             }
@@ -452,11 +454,12 @@ function CodeCard({
   );
 }
 
-type SketchTool = "pen" | "eraser" | "circle" | "square" | "rectangle" | "right-triangle" | "triangle" | "hexagon";
+type SketchTool = "pen" | "eraser" | "fill" | "circle" | "square" | "rectangle" | "right-triangle" | "triangle" | "hexagon";
 const SHAPE_TOOLS: SketchTool[] = ["circle", "square", "rectangle", "right-triangle", "triangle", "hexagon"];
 const DRAW_TOOLS: { id: SketchTool; label: string }[] = [
   { id: "pen", label: "Pen" },
   { id: "eraser", label: "Eraser" },
+  { id: "fill", label: "Fill" },
   { id: "circle", label: "Circle" },
   { id: "square", label: "Square" },
   { id: "rectangle", label: "Rectangle" },
@@ -492,6 +495,14 @@ function SketchToolIcon({ tool }: { tool: SketchTool }) {
         <svg {...common}>
           <path d="m7 21-4.3-4.3c-.94-.94-.94-2.47 0-3.42l9.58-9.58c.94-.94 2.47-.94 3.42 0l5.3 5.3c.94.94.94 2.47 0 3.42L13 21" />
           <path d="M22 21H7" />
+        </svg>
+      );
+    case "fill":
+      return (
+        <svg {...common}>
+          <path d="M10 3 3 10c-.6.6-.6 1.6 0 2.2l7 7c.6.6 1.6.6 2.2 0l7-7c.6-.6.6-1.6 0-2.2l-7-7c-.6-.6-1.6-.6-2.2 0Z" />
+          <path d="M3 10h16" />
+          <path d="M19 15c0 1.4-1 2.5-1 2.5s-1-1.1-1-2.5a1 1 0 0 1 2 0Z" />
         </svg>
       );
     case "circle":
@@ -601,6 +612,70 @@ function drawSketchShape(ctx: CanvasRenderingContext2D, tool: SketchTool, x0: nu
   ctx.stroke();
 }
 
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const clean = hex.replace("#", "");
+  const full = clean.length === 3 ? clean.split("").map((c) => c + c).join("") : clean;
+  const num = parseInt(full, 16);
+  return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
+}
+
+// Classic stack-based paint-bucket fill: starting from the clicked pixel,
+// flood-fills every contiguous pixel that's within a small color tolerance
+// of it (a little slack rather than an exact match, so it still fills
+// cleanly right up against an antialiased pen/shape edge instead of
+// stopping a pixel short) with the current color. Cheap enough to run
+// synchronously — the canvas is a fixed 420x200, so at most ~84,000
+// pixels — so there's no need for the async/chunked flood-fill some paint
+// apps use for much larger canvases.
+function floodFillCanvas(ctx: CanvasRenderingContext2D, startX: number, startY: number, fillColor: string) {
+  const { width, height } = ctx.canvas;
+  const x0 = Math.max(0, Math.min(width - 1, Math.floor(startX)));
+  const y0 = Math.max(0, Math.min(height - 1, Math.floor(startY)));
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+
+  const startIdx = (y0 * width + x0) * 4;
+  const startR = data[startIdx];
+  const startG = data[startIdx + 1];
+  const startB = data[startIdx + 2];
+  const startA = data[startIdx + 3];
+
+  const fill = hexToRgb(fillColor);
+  if (startR === fill.r && startG === fill.g && startB === fill.b && startA === 255) return;
+
+  const tolerance = 32;
+  const toleranceSq = tolerance * tolerance;
+  function matches(idx: number) {
+    const dr = data[idx] - startR;
+    const dg = data[idx + 1] - startG;
+    const db = data[idx + 2] - startB;
+    const da = data[idx + 3] - startA;
+    return dr * dr + dg * dg + db * db + da * da <= toleranceSq;
+  }
+
+  const visited = new Uint8Array(width * height);
+  const stackX: number[] = [x0];
+  const stackY: number[] = [y0];
+  while (stackX.length) {
+    const x = stackX.pop() as number;
+    const y = stackY.pop() as number;
+    if (x < 0 || x >= width || y < 0 || y >= height) continue;
+    const pixelPos = y * width + x;
+    if (visited[pixelPos]) continue;
+    const idx = pixelPos * 4;
+    if (!matches(idx)) continue;
+    visited[pixelPos] = 1;
+    data[idx] = fill.r;
+    data[idx + 1] = fill.g;
+    data[idx + 2] = fill.b;
+    data[idx + 3] = 255;
+    stackX.push(x + 1, x - 1, x, x);
+    stackY.push(y, y, y + 1, y - 1);
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+}
+
 // A React port of the prototype's raw-DOM initSketchCanvases(): pointer
 // events drawn straight onto a fixed 420x200 canvas, saved on every stroke
 // end. Drawing state (drawing/lastX/lastY/shapeStart) lives in refs, not
@@ -638,18 +713,27 @@ function SketchCard({
   pending,
   onRemove,
   onSaved,
+  onSaveAsImage,
 }: {
   file: FileWithUrl | undefined;
   pending: boolean;
   onRemove: () => void;
   onSaved: (formData: FormData) => void;
+  onSaveAsImage: (formData: FormData) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
   const last = useRef({ x: 0, y: 0 });
   const shapeStart = useRef<{ x: number; y: number; snapshot: ImageData } | null>(null);
+  // A single snapshot of the canvas taken right before the most recent
+  // committed action (a stroke, a shape, a fill, or a clear) — not a full
+  // undo stack, just the one the user asked for: "single undo the last
+  // action". Undoing consumes it (canUndo goes false again) rather than
+  // supporting redo or multiple undos.
+  const undoSnapshot = useRef<ImageData | null>(null);
   const [tool, setTool] = useState<SketchTool>("pen");
   const [color, setColor] = useState(SKETCH_COLORS[0]);
+  const [canUndo, setCanUndo] = useState(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -680,9 +764,24 @@ function SketchCard({
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) return;
+    const p = pos(e);
+
+    // Fill is a single click/tap action, not a drag — commit it right
+    // here and return, same as clearSketch, rather than joining the
+    // drawing.current drag machinery below.
+    if (tool === "fill") {
+      undoSnapshot.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      setCanUndo(true);
+      ctx.globalCompositeOperation = "source-over";
+      floodFillCanvas(ctx, p.x, p.y, color);
+      saveCanvas();
+      return;
+    }
+
     drawing.current = true;
     canvas.setPointerCapture(e.pointerId);
-    const p = pos(e);
+    undoSnapshot.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    setCanUndo(true);
 
     if (tool === "pen" || tool === "eraser") {
       last.current = p;
@@ -699,7 +798,10 @@ function SketchCard({
       ctx.fill();
     } else {
       ctx.globalCompositeOperation = "source-over";
-      shapeStart.current = { x: p.x, y: p.y, snapshot: ctx.getImageData(0, 0, canvas.width, canvas.height) };
+      // Reuses the same pre-stroke snapshot just captured for undo — it's
+      // an untouched copy of the canvas either way, so there's no reason
+      // to call getImageData a second time for the shape-preview restore.
+      shapeStart.current = { x: p.x, y: p.y, snapshot: undoSnapshot.current };
     }
   }
 
@@ -749,10 +851,39 @@ function SketchCard({
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) return;
+    undoSnapshot.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    setCanUndo(true);
     ctx.globalCompositeOperation = "source-over";
     ctx.fillStyle = "#FBFAF7";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     saveCanvas();
+  }
+
+  function handleUndo() {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx || !undoSnapshot.current) return;
+    ctx.putImageData(undoSnapshot.current, 0, 0);
+    undoSnapshot.current = null;
+    setCanUndo(false);
+    saveCanvas();
+  }
+
+  // Converts the sketch into a plain image attachment: one last save of
+  // the current canvas, then the object's kind flips server-side from
+  // "sketch" to "file" — see saveSketchAsImage's own comment in
+  // lib/actions.ts. From the next data refresh on, TaskObjects renders
+  // this object with FileCard instead of SketchCard, so this really does
+  // replace the sketch pad completely, as asked for.
+  function saveAsImage() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const formData = new FormData();
+      formData.append("file", blob, "sketch.png");
+      onSaveAsImage(formData);
+    }, "image/png");
   }
 
   return (
@@ -811,9 +942,24 @@ function SketchCard({
           onPointerCancel={endStroke}
         />
       </div>
-      <button type="button" className="small-btn ghost-btn" style={{ marginTop: 8 }} onClick={clearSketch} disabled={pending}>
-        Clear sketch
-      </button>
+      <div className="sketch-actions">
+        <button type="button" className="small-btn ghost-btn" onClick={clearSketch} disabled={pending}>
+          Clear sketch
+        </button>
+        <button type="button" className="small-btn ghost-btn" onClick={handleUndo} disabled={pending || !canUndo} title="Undo the last action">
+          Undo
+        </button>
+        <button
+          type="button"
+          className="small-btn"
+          style={{ marginLeft: "auto" }}
+          onClick={saveAsImage}
+          disabled={pending}
+          title="Replace this sketch pad with a saved PNG image"
+        >
+          Save as image
+        </button>
+      </div>
     </div>
   );
 }

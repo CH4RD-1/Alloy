@@ -1501,6 +1501,13 @@ textarea.text-input {
   background: none;
   cursor: pointer;
 }
+.sketch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
 /* ============ CODE BLOCK ATTACHMENT ============ */
 .code-block-toolbar {
   display: flex;

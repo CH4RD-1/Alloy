@@ -647,6 +647,25 @@ export async function saveSketchImage(orgId: string, taskId: string, taskObjectI
   revalidatePath("/dashboard");
 }
 
+// "Sketch Pad 3.0"'s "Save as image" — saves the current canvas one final
+// time (identical to saveSketchImage above) and then flips the object's
+// kind from "sketch" to "file". Nothing about the Storage path or the
+// task_object_files row has to change to make that flip work: both
+// functions already write to the exact same taskAttachmentPath shape, so a
+// sketch's underlying file is already structurally indistinguishable from
+// a real upload's — only the kind column says otherwise. Once flipped,
+// TaskObjects renders it with FileCard (image thumbnail, since
+// mime_type is "image/png") instead of SketchCard, and this is one-way:
+// the toolbar is gone for good, same as the user's own "replaces the
+// sketch pad completely" framing.
+export async function saveSketchAsImage(orgId: string, taskId: string, taskObjectId: string, formData: FormData) {
+  await saveSketchImage(orgId, taskId, taskObjectId, formData);
+  const { supabase } = await requireUser();
+  const { error } = await supabase.from("task_objects").update({ kind: "file" }).eq("id", taskObjectId);
+  if (error) throw new Error(error.message);
+  revalidatePath("/dashboard");
+}
+
 export async function deleteTaskObject(objectId: string) {
   const { supabase } = await requireUser();
   // checklist_items reference task_object_id with ON DELETE CASCADE, so a
