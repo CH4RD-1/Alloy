@@ -591,12 +591,66 @@ html {
   display: flex;
   gap: 8px;
 }
-.duration-input {
-  margin-top: 8px;
+.date-box-row {
+  display: flex;
+  gap: 8px;
 }
-.duration-input:disabled {
+.date-box {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px 8px;
+  background: var(--surface-2);
+}
+.date-box-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+.date-box .text-input {
+  padding: 4px 6px;
+  border-color: transparent;
+  background: var(--surface);
+}
+.duration-box {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px 10px;
+  background: var(--surface-2);
+}
+.duration-box-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+.duration-box-controls {
+  display: flex;
+  gap: 8px;
+}
+.duration-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.duration-input:disabled,
+.duration-unit-select:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+.duration-unit-select {
+  flex: 0 0 110px;
+  width: auto;
+  font-size: 12px;
+  padding: 7px 8px;
 }
 .text-input,
 .select-input,

@@ -80,11 +80,115 @@ function taskDurationDays(start: string | null | undefined, due: string | null |
   const days = Math.round((e.getTime() - s.getTime()) / 86400000);
   return days >= 0 ? days : null;
 }
-function addDaysToDate(start: string, days: number): string {
+// Duration box units (see DurationField below) — hours/weeks/months/years
+// all resolve to a whole number of days added to start_date, since
+// start_date/due_date are date-only columns with no time component.
+// Months/years use real calendar arithmetic (setUTCMonth/setUTCFullYear)
+// rather than a flat *30/*365 multiply, so "1 month" from Jan 31 lands on
+// Feb 28 the way a calendar would, not 30 days later.
+type DurationUnit = "hours" | "days" | "weeks" | "months" | "years";
+const DURATION_UNITS: { value: DurationUnit; label: string }[] = [
+  { value: "hours", label: "Hours" },
+  { value: "days", label: "Days" },
+  { value: "weeks", label: "Weeks" },
+  { value: "months", label: "Months" },
+  { value: "years", label: "Years" },
+];
+function addDurationToDate(start: string, amount: number, unit: DurationUnit): string {
   const s = parseDateOnly(start);
   if (!s) return start;
-  s.setUTCDate(s.getUTCDate() + days);
+  switch (unit) {
+    case "hours":
+      // Date-only storage can't represent partial days — round to the
+      // nearest whole day (so e.g. 4 hours stays same-day, 20 hours
+      // becomes +1 day) rather than always rounding up or down.
+      s.setUTCDate(s.getUTCDate() + Math.round(amount / 24));
+      break;
+    case "days":
+      s.setUTCDate(s.getUTCDate() + Math.round(amount));
+      break;
+    case "weeks":
+      s.setUTCDate(s.getUTCDate() + Math.round(amount * 7));
+      break;
+    case "months":
+      s.setUTCMonth(s.getUTCMonth() + Math.round(amount));
+      break;
+    case "years":
+      s.setUTCFullYear(s.getUTCFullYear() + Math.round(amount));
+      break;
+  }
   return formatDateOnly(s);
+}
+
+// The Duration box under Start/Due Dates on a regular (non-milestone,
+// non-Helpdesk) task. Local component state (seeded once from the task's
+// current start/due gap, in days) rather than the rest of this panel's
+// uncontrolled-input-with-defaultValue convention, since this control
+// needs to read back its own number+unit together on every change — kept
+// safe from the same "router.refresh() mid-edit" concern those other
+// inputs avoid by being keyed per task (see the `key={taskId}` where this
+// is rendered below), so switching tasks resets it correctly. Only ever
+// writes due_date; start_date/is_milestone stay owned by their own inputs
+// above it, and the "days elapsed" it shows on open is always relative to
+// whatever start_date is set, in Days — the display unit isn't persisted
+// anywhere (only start_date/due_date are stored), so a duration entered in
+// e.g. weeks reads back as the equivalent day count next time the task is
+// opened, not "2 weeks" again.
+function DurationField({
+  taskId,
+  startDate,
+  run,
+  durationDays,
+}: {
+  taskId: string;
+  startDate: string | null;
+  run: (action: () => Promise<unknown>) => void;
+  durationDays: number | null;
+}) {
+  const [amount, setAmount] = useState(durationDays === null ? "" : String(durationDays));
+  const [unit, setUnit] = useState<DurationUnit>("days");
+
+  function save(nextAmount: string, nextUnit: DurationUnit) {
+    if (nextAmount === "" || !startDate) return;
+    const value = Number(nextAmount);
+    if (!Number.isFinite(value) || value < 0) return;
+    const due = addDurationToDate(startDate, value, nextUnit);
+    run(() => updateTaskFields(taskId, { due_date: due }));
+  }
+
+  return (
+    <div className="duration-box">
+      <span className="duration-box-label">Duration</span>
+      <div className="duration-box-controls">
+        <input
+          type="number"
+          min={0}
+          className="text-input duration-input"
+          placeholder={startDate ? "0" : "Set a start date first"}
+          disabled={!startDate}
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          onBlur={() => save(amount, unit)}
+        />
+        <select
+          className="select-input duration-unit-select"
+          value={unit}
+          disabled={!startDate}
+          onChange={(e) => {
+            const nextUnit = e.target.value as DurationUnit;
+            setUnit(nextUnit);
+            save(amount, nextUnit);
+          }}
+        >
+          {DURATION_UNITS.map((u) => (
+            <option key={u.value} value={u.value}>
+              {u.label}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
 }
 
 export function TaskPanel({
@@ -433,35 +537,32 @@ export function TaskPanel({
                 />
               ) : (
                 <>
-                  <div className="field-row">
-                    <input
-                      type="date"
-                      className="text-input"
-                      defaultValue={task.start_date ?? ""}
-                      onBlur={(e) => run(() => updateTaskFields(taskId, { start_date: e.target.value }))}
-                    />
-                    <input
-                      type="date"
-                      className="text-input"
-                      defaultValue={task.due_date ?? ""}
-                      onBlur={(e) => run(() => updateTaskFields(taskId, { due_date: e.target.value }))}
-                    />
+                  <div className="date-box-row">
+                    <label className="date-box">
+                      <span className="date-box-label">Start</span>
+                      <input
+                        type="date"
+                        className="text-input"
+                        defaultValue={task.start_date ?? ""}
+                        onBlur={(e) => run(() => updateTaskFields(taskId, { start_date: e.target.value }))}
+                      />
+                    </label>
+                    <label className="date-box">
+                      <span className="date-box-label">Due</span>
+                      <input
+                        type="date"
+                        className="text-input"
+                        defaultValue={task.due_date ?? ""}
+                        onBlur={(e) => run(() => updateTaskFields(taskId, { due_date: e.target.value }))}
+                      />
+                    </label>
                   </div>
-                  <input
-                    type="number"
-                    min={0}
-                    className="text-input duration-input"
-                    placeholder={task.start_date ? "Duration (days)" : "Set a start date first"}
-                    disabled={!task.start_date}
-                    defaultValue={taskDurationDays(task.start_date, task.due_date) ?? ""}
-                    onBlur={(e) => {
-                      const raw = e.target.value;
-                      if (raw === "" || !task.start_date) return;
-                      const days = Number(raw);
-                      if (!Number.isFinite(days) || days < 0) return;
-                      const due = addDaysToDate(task.start_date, Math.round(days));
-                      run(() => updateTaskFields(taskId, { due_date: due }));
-                    }}
+                  <DurationField
+                    key={taskId}
+                    taskId={taskId}
+                    startDate={task.start_date}
+                    run={run}
+                    durationDays={taskDurationDays(task.start_date, task.due_date)}
                   />
                 </>
               )}

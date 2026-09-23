@@ -1503,6 +1503,44 @@ export async function enableProjectAllocations(orgId: string, projectId: string)
   revalidatePath("/dashboard");
 }
 
+// Auto-derives a project tag when the caller leaves one blank, so a
+// project can never end up permanently untagged — see
+// next_task_display_id() in schema.sql: an untagged project's tasks get a
+// null display_id forever (never backfilled even if a tag is set later),
+// which is exactly the gap this closes. Tries the project name's own
+// first 2 alphanumeric characters first ("General" -> "GE", "Support" ->
+// "SU" — the obvious, readable choice a user would likely have typed
+// themselves), then <first-letter><digit>, then every two-letter
+// combination, until it finds one this org isn't already using — the
+// tag's own org-wide unique index (projects_tag_upper_uq) is what
+// actually enforces no collision; this just avoids guessing wrong on the
+// common case where the first-2-letters choice is already taken.
+async function deriveProjectTag(
+  supabase: Awaited<ReturnType<typeof createClient>> | ReturnType<typeof createServiceRoleClient>,
+  orgId: string,
+  name: string
+): Promise<string> {
+  const { data: existing } = await supabase.from("projects").select("tag").eq("org_id", orgId);
+  const used = new Set(
+    (existing ?? []).map((p: any) => (p.tag as string | null)?.toUpperCase()).filter((t): t is string => !!t)
+  );
+
+  const alnum = name.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const first = alnum[0] ?? "P";
+  const candidates: string[] = [];
+  if (alnum.length >= 2) candidates.push(alnum.slice(0, 2));
+  for (let d = 0; d <= 9; d++) candidates.push(first + d);
+  for (let c = 65; c <= 90; c++) candidates.push(first + String.fromCharCode(c));
+  for (let a = 65; a <= 90; a++) {
+    for (let b = 65; b <= 90; b++) candidates.push(String.fromCharCode(a) + String.fromCharCode(b));
+  }
+
+  for (const candidate of candidates) {
+    if (!used.has(candidate)) return candidate;
+  }
+  throw new Error("Could not find an available project tag."); // practically unreachable (676 two-letter combos)
+}
+
 // Every new project needs at least one bucket to assign tasks to — seeds a
 // starter "General" team in the project's own color, mirroring create-project
 // in the prototype rather than leaving a brand-new project's team list empty.
@@ -1542,6 +1580,11 @@ export async function createProject(
     assetWorkflowId = (assetWorkflow?.id as string | undefined) ?? null;
   }
 
+  // A user who doesn't type a tag still gets one — see deriveProjectTag's
+  // own comment for why leaving a project permanently untagged is worth
+  // avoiding rather than just defaulting to null the way this used to.
+  const finalTag = tagRaw || (await deriveProjectTag(supabase, orgId, input.name));
+
   const { data: project, error } = await supabase
     .from("projects")
     .insert({
@@ -1550,14 +1593,14 @@ export async function createProject(
       color: input.color,
       is_helpdesk: input.isHelpdesk,
       enable_allocations: input.enableAllocations,
-      tag: tagRaw || null,
+      tag: finalTag,
       workflow_id: (taskWorkflow?.id as string | undefined) ?? null,
       asset_workflow_id: assetWorkflowId,
     })
     .select("id")
     .single();
   if (error) {
-    if (error.code === "23505") throw new Error(`Another project in this org already uses the tag "${tagRaw}".`);
+    if (error.code === "23505") throw new Error(`Another project in this org already uses the tag "${finalTag}".`);
     throw new Error(error.message);
   }
 
@@ -2153,10 +2196,10 @@ export async function updateMemberRole(orgId: string, userId: string, role: Role
 // survived so far, the task/team wording). Deliberately minimal: a new org
 // gets somewhere to put its first real task, not a full demo dataset —
 // that's what seed.sql is for.
-const TEMPLATE_STARTERS: Record<OrgTemplate, { projectName: string; teamName: string; isHelpdesk: boolean }> = {
-  core: { projectName: "General", teamName: "General", isHelpdesk: false },
-  helpdesk: { projectName: "Support", teamName: "Support", isHelpdesk: true },
-  engineering: { projectName: "Engineering", teamName: "Engineering", isHelpdesk: false },
+const TEMPLATE_STARTERS: Record<OrgTemplate, { projectName: string; teamName: string; isHelpdesk: boolean; tag: string }> = {
+  core: { projectName: "General", teamName: "General", isHelpdesk: false, tag: "GE" },
+  helpdesk: { projectName: "Support", teamName: "Support", isHelpdesk: true, tag: "SU" },
+  engineering: { projectName: "Engineering", teamName: "Engineering", isHelpdesk: false, tag: "EN" },
 };
 
 function slugify(name: string): string {
@@ -2374,6 +2417,7 @@ export async function completeSignup(input: { orgName: string; template: OrgTemp
       name: starter.projectName,
       color: "#d9662a",
       is_helpdesk: starter.isHelpdesk,
+      tag: starter.tag,
       workflow_id: starter.isHelpdesk ? helpdeskWorkflowId : taskWorkflowId,
     })
     .select("id")
