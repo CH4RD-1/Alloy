@@ -3,6 +3,15 @@
 // `supabase gen types typescript` once the project is on Supabase.
 
 export type Role = "owner" | "admin" | "manager" | "authorizer" | "standard";
+
+// orgs.dev_tools — see that column's own comment in schema.sql. A master
+// switch plus three independently-toggleable developer tools.
+export interface DevTools {
+  enabled: boolean;
+  userSwitch: boolean;
+  dummyUsers: boolean;
+  templates: boolean;
+}
 // "blocked"/"blocks" are always stored and removed as a mirrored pair
 // (see the task_links note in schema.sql and addLink/removeLink in
 // lib/actions.ts) — "blocked" on the dependent task, "blocks" on the

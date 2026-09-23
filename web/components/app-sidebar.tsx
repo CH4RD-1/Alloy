@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import type { Project, Team } from "@/lib/types";
+import type { Project, Team, Role, DevTools } from "@/lib/types";
 import type { TaskRow } from "@/lib/list-view";
+import type { MemberSummary } from "@/lib/tasks-data";
 import { ALL_PROJECTS_KEY, teamGroupsFor, taskCountForProject } from "@/lib/sidebar-view";
 
 // The white-circle-red-cross mark that flags a Helpdesk project — ported
@@ -64,6 +65,13 @@ export function AppSidebar({
   onManageWorkflow,
   onManageOrg,
   onManageSla,
+  onManageDev,
+  devTools,
+  members,
+  realUserId,
+  realUserRole,
+  viewingAs,
+  onViewingAsChange,
 }: {
   projects: Project[];
   teams: Team[];
@@ -80,6 +88,19 @@ export function AppSidebar({
   onManageWorkflow: () => void;
   onManageOrg: () => void;
   onManageSla: () => void;
+  onManageDev: () => void;
+  // Dev tools (components/dev-tools-panel.tsx) — devTools.userSwitch gates
+  // whether the "Viewing as" picker below shows at all; realUserRole (the
+  // signed-in account's own actual role, never the switched-to one) gates
+  // it a second time to owner/admin only, since it's the one control that
+  // lets you act as someone else. viewingAs is null while viewing as
+  // yourself, the normal case.
+  devTools: DevTools;
+  members: MemberSummary[];
+  realUserId: string;
+  realUserRole: Role;
+  viewingAs: { id: string; name: string; role: Role } | null;
+  onViewingAsChange: (next: { id: string; name: string; role: Role } | null) => void;
 }) {
   const groups = teamGroupsFor(projectFilter, teams);
   const teamNoun = vocabTeam.toLowerCase();
@@ -145,6 +166,54 @@ export function AppSidebar({
           Reset sample data, the footer's other two prototype buttons, still
           aren't ported — see the README. */}
       <div className="sidebar-footer">
+        {/* "Viewing as" (components/dev-tools-panel.tsx) — only an owner/
+            admin sees this, and only once Dev tools' User switch is on
+            (see that panel). Picking a member/dummy user changes what the
+            rest of the app shows (role-gated UI, "my tasks") and attributes
+            anything created while switched to that identity in the
+            activity log; the real account still does the actual writes. */}
+        {devTools.enabled && devTools.userSwitch && (realUserRole === "owner" || realUserRole === "admin") && (
+          <div className="view-as-row">
+            <span className="view-as-label">Viewing as</span>
+            <select
+              className="select-input view-as-select"
+              value={viewingAs?.id ?? ""}
+              onChange={(e) => {
+                const id = e.target.value;
+                if (!id) {
+                  onViewingAsChange(null);
+                  return;
+                }
+                const m = members.find((mm) => mm.userId === id);
+                if (m) onViewingAsChange({ id: m.userId, name: m.name, role: m.role });
+              }}
+            >
+              <option value="">Yourself</option>
+              {members.filter((m) => !m.isDummy && m.userId !== realUserId).length > 0 && (
+                <optgroup label="Members">
+                  {members
+                    .filter((m) => !m.isDummy && m.userId !== realUserId)
+                    .map((m) => (
+                      <option key={m.userId} value={m.userId}>
+                        {m.name} ({m.role})
+                      </option>
+                    ))}
+                </optgroup>
+              )}
+              {members.filter((m) => m.isDummy).length > 0 && (
+                <optgroup label="Dummy users">
+                  {members
+                    .filter((m) => m.isDummy)
+                    .map((m) => (
+                      <option key={m.userId} value={m.userId}>
+                        {m.name} ({m.role})
+                      </option>
+                    ))}
+                </optgroup>
+              )}
+            </select>
+          </div>
+        )}
         <button
           type="button"
           className={`ghost-btn settings-toggle-btn ${settingsOpen ? "active" : ""}`}
@@ -179,6 +248,9 @@ export function AppSidebar({
             </button>
             <button type="button" className="ghost-btn" onClick={onManageSla}>
               ⏱ SLA settings
+            </button>
+            <button type="button" className="ghost-btn" onClick={onManageDev}>
+              ⚒ Developer
             </button>
           </div>
         )}

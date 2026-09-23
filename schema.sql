@@ -86,6 +86,18 @@ create table orgs (
   -- Defaults (24 working hours / 14 days) match the org's own request.
   sla_first_response_hours integer not null default 24 check (sla_first_response_hours > 0),
   sla_resolution_days      integer not null default 14 check (sla_resolution_days > 0),
+  -- Developer tools (components/dev-tools-panel.tsx) — a master on/off
+  -- switch plus three independently-switchable sub-tools: "userSwitch" (the
+  -- "Viewing as" control that lets an owner/admin preview the app as
+  -- another member or a dummy user — see users.is_dummy below),
+  -- "dummyUsers" (whether the dummy-user manager shows), and "templates"
+  -- (project export/import). All four default off — a brand-new org never
+  -- sees developer tooling until someone opts in. One JSONB column rather
+  -- than four booleans since this is purely a UI-visibility toggle set with
+  -- no query/index needs of its own, and it's easy to grow. Written through
+  -- orgs_admin_update like every other org-settings field on this table —
+  -- no separate policy needed.
+  dev_tools         jsonb not null default '{"enabled":false,"userSwitch":false,"dummyUsers":false,"templates":false}'::jsonb,
   created_at        timestamptz not null default now()
 );
 
@@ -99,6 +111,15 @@ create table users (
   email       text not null unique,
   name        text,
   avatar_url  text,
+  -- Set only by createDummyUser (lib/actions.ts, service-role, owner/admin-
+  -- gated) — a row with no corresponding auth.users entry at all, so it can
+  -- never actually sign in. Otherwise a fully real users/org_members row:
+  -- assignable to tasks, shown in every member dropdown, eligible for any
+  -- role — the point is letting an owner/admin genuinely test workflows,
+  -- assignment, and role-gated UI as if a real teammate held that role,
+  -- without provisioning a real account. See the "Developer tools" comment
+  -- on orgs.dev_tools above for the full feature this supports.
+  is_dummy    boolean not null default false,
   created_at  timestamptz not null default now()
 );
 

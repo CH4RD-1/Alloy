@@ -16,6 +16,7 @@ export function NewTaskPanel({
   vocabTask,
   orgTeamAllocationEnabled,
   teamMemberIdsByTeam,
+  actingAsUserId,
   onClose,
 }: {
   orgId: string;
@@ -26,6 +27,12 @@ export function NewTaskPanel({
   vocabTask: string;
   orgTeamAllocationEnabled: boolean;
   teamMemberIdsByTeam: Map<string, string[]>;
+  // Dev tools "View as" (components/dev-tools-panel.tsx) — when the owner/
+  // admin viewing this is previewing the app as another member or dummy
+  // user, the created task's author (activity log) is attributed to that
+  // identity instead of the real signed-in account. Null/undefined when
+  // viewing as yourself, the normal case.
+  actingAsUserId?: string | null;
   onClose: () => void;
 }) {
   const router = useRouter();
@@ -64,6 +71,7 @@ export function NewTaskPanel({
           isMilestone,
           startDate: startDate || null,
           dueDate: dueDate || null,
+          actingAsUserId,
         });
         router.refresh();
         onClose();

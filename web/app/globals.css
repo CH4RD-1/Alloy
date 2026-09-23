@@ -2355,6 +2355,32 @@ textarea.text-input {
   padding-top: 10px;
   border-top: 1px solid var(--border);
 }
+/* "Viewing as" (dev tools User switch — components/dev-tools-panel.tsx),
+   shown above the Settings toggle only for an owner/admin once that
+   sub-tool is on. Small and understated on purpose — it's a testing aid,
+   not a primary nav control — but still needs to read clearly since it
+   changes what the rest of the app shows while it's set to someone else. */
+.view-as-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px 8px;
+  border-bottom: 1px dashed var(--border);
+  margin-bottom: 4px;
+}
+.view-as-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  flex: 0 0 auto;
+}
+.view-as-select {
+  flex: 1;
+  font-size: 11.5px;
+  padding: 4px 6px;
+}
 .ghost-btn {
   background: none;
   border: 1px solid var(--border-strong);

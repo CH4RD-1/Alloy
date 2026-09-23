@@ -23,6 +23,7 @@ import type {
   Contact,
   Invite,
   SubscriptionStatus,
+  DevTools,
 } from "@/lib/types";
 
 // Denormalized view of an org member for dropdowns (assignee picker, etc.) —
@@ -32,6 +33,11 @@ export interface MemberSummary {
   name: string;
   email: string;
   role: Role;
+  // True for a dev-tools "dummy user" (components/dev-tools-panel.tsx) —
+  // a real, assignable member with no linked login. Lets the member list/
+  // assignee dropdowns render a small "Dummy" flag rather than pretending
+  // it's a real teammate.
+  isDummy: boolean;
 }
 
 export interface WorkspaceData {
@@ -53,6 +59,7 @@ export interface WorkspaceData {
   // the team_members table. Off by default; while off, teamMemberIdsByTeam
   // below is still fetched and populated but nothing in the UI reads it.
   orgTeamAllocationEnabled: boolean;
+  devTools: DevTools;
   // SLA targets for Helpdesk tickets — see schema.sql's own comment on
   // orgs.sla_first_response_hours/sla_resolution_days, lib/sla.ts, and
   // components/sla-settings-panel.tsx.
@@ -141,7 +148,7 @@ export async function getWorkspaceData(userId: string): Promise<WorkspaceData | 
   const { data: membership } = await supabase
     .from("org_members")
     .select(
-      "org_id, role, orgs ( template, name, slug, custom_domain, subscription_status, stripe_price_id, subscription_current_period_end, team_allocation_enabled, sla_first_response_hours, sla_resolution_days )"
+      "org_id, role, orgs ( template, name, slug, custom_domain, subscription_status, stripe_price_id, subscription_current_period_end, team_allocation_enabled, sla_first_response_hours, sla_resolution_days, dev_tools )"
     )
     .eq("user_id", userId)
     .limit(1)
@@ -162,6 +169,13 @@ export async function getWorkspaceData(userId: string): Promise<WorkspaceData | 
   const orgTeamAllocationEnabled = !!orgRow.team_allocation_enabled;
   const slaFirstResponseHours = Number(orgRow.sla_first_response_hours ?? 24);
   const slaResolutionDays = Number(orgRow.sla_resolution_days ?? 14);
+  const rawDevTools = orgRow.dev_tools ?? {};
+  const devTools: DevTools = {
+    enabled: !!rawDevTools.enabled,
+    userSwitch: !!rawDevTools.userSwitch,
+    dummyUsers: !!rawDevTools.dummyUsers,
+    templates: !!rawDevTools.templates,
+  };
   const currentUserRole = membership.role as Role;
 
   const [
@@ -193,7 +207,7 @@ export async function getWorkspaceData(userId: string): Promise<WorkspaceData | 
     supabase.from("task_links").select("*").eq("org_id", orgId),
     supabase.from("assets").select("*").eq("org_id", orgId),
     supabase.from("tags").select("*").eq("org_id", orgId),
-    supabase.from("org_members").select("user_id, role, users ( name, email )").eq("org_id", orgId),
+    supabase.from("org_members").select("user_id, role, users ( name, email, is_dummy )").eq("org_id", orgId),
     supabase.from("docs").select("*").eq("org_id", orgId).order("updated_at", { ascending: false }),
     supabase.from("task_objects").select("*").eq("org_id", orgId).order("position"),
     supabase.from("form_templates").select("*").eq("org_id", orgId).order("created_at"),
@@ -365,6 +379,7 @@ export async function getWorkspaceData(userId: string): Promise<WorkspaceData | 
     name: m.users?.name || m.users?.email || "Unknown",
     email: m.users?.email ?? "",
     role: m.role,
+    isDummy: !!m.users?.is_dummy,
   }));
 
   return {
@@ -382,6 +397,7 @@ export async function getWorkspaceData(userId: string): Promise<WorkspaceData | 
     teamMemberIdsByTeam,
     currentUserId: userId,
     currentUserRole,
+    devTools,
     tasks: (tasks ?? []) as Task[],
     statuses: (statuses ?? []) as WorkflowStatus[],
     transitions: (transitions ?? []) as WorkflowTransition[],

@@ -6,7 +6,7 @@ import { revalidatePath } from "next/cache";
 import { autoArrangeCompute, cascadeSchedule, type ScheduleTask } from "@/lib/gantt-schedule";
 import { TASK_ATTACHMENTS_BUCKET, TASK_ATTACHMENT_MAX_BYTES, taskAttachmentPath, ticketMessageAttachmentPath, sanitizeFilename } from "@/lib/storage";
 import { replyToAddressForTask } from "@/lib/channel-verify";
-import type { FormField, FormFieldType, Role, OrgTemplate, TicketChannel, WorkflowType } from "@/lib/types";
+import type { FormField, FormFieldType, Role, OrgTemplate, TicketChannel, WorkflowType, DevTools } from "@/lib/types";
 
 // The three role levels the prototype's own "Workflow & roles" panel ever
 // exposed (its ROLES constant: standard/authorizer/manager). "owner" and
@@ -100,13 +100,30 @@ async function assignDisplayId(
   return { task_number: (data as any).task_number ?? null, display_id: (data as any).display_id ?? null };
 }
 
-export async function updateTaskStatus(taskId: string, toStatusId: string) {
+export async function updateTaskStatus(taskId: string, toStatusId: string, actingAsUserId?: string | null) {
   const { supabase, user } = await requireUser();
 
   const { data: task } = await supabase.from("tasks").select("id, org_id, status_id").eq("id", taskId).single();
   if (!task) throw new Error("Task not found.");
 
-  const role = await roleInOrg(supabase, task.org_id, user.id);
+  // "View as" (components/dev-tools-panel.tsx) lets an owner/admin preview
+  // the app — including role-gated moves like this one — as another member
+  // or dummy user. actingAsUserId, when set, is who the transition-role
+  // check below and the activity log's actor are evaluated against instead
+  // of the real signed-in caller. Only an owner/admin can actually do this
+  // (checked here, not just relied on client-side, since the client could
+  // send any id): the real caller's own role is what's checked, same
+  // caller-role guard pattern as updateMemberRole's above — this can only
+  // ever narrow what the real account could already do, never widen it,
+  // since an owner/admin already passes every role gate below regardless.
+  let actorUserId = user.id;
+  if (actingAsUserId && actingAsUserId !== user.id) {
+    const realRole = await roleInOrg(supabase, task.org_id, user.id);
+    if (realRole !== "owner" && realRole !== "admin") throw new Error("Only an owner or admin can act as another user.");
+    actorUserId = actingAsUserId;
+  }
+
+  const role = await roleInOrg(supabase, task.org_id, actorUserId);
 
   const { data: transition } = await supabase
     .from("workflow_transitions")
@@ -152,7 +169,7 @@ export async function updateTaskStatus(taskId: string, toStatusId: string) {
     type: "status",
     fromStatusId: task.status_id,
     toStatusId,
-    actorUserId: user.id,
+    actorUserId,
   });
   revalidatePath("/dashboard");
 }
@@ -215,8 +232,19 @@ export async function createTask(input: {
   isMilestone: boolean;
   startDate: string | null;
   dueDate: string | null;
+  // "View as" (see updateTaskStatus's own comment above) — when set,
+  // created_by/the activity-log actor reflect this identity instead of the
+  // real signed-in caller. Same owner/admin-only guard.
+  actingAsUserId?: string | null;
 }) {
   const { supabase, user } = await requireUser();
+
+  let actorUserId = user.id;
+  if (input.actingAsUserId && input.actingAsUserId !== user.id) {
+    const realRole = await roleInOrg(supabase, input.orgId, user.id);
+    if (realRole !== "owner" && realRole !== "admin") throw new Error("Only an owner or admin can act as another user.");
+    actorUserId = input.actingAsUserId;
+  }
 
   const { data: project } = await supabase.from("projects").select("workflow_id").eq("id", input.projectId).maybeSingle();
   if (!project?.workflow_id) throw new Error("This project has no workflow configured yet — set one in Manage Projects.");
@@ -246,7 +274,7 @@ export async function createTask(input: {
       is_milestone: input.isMilestone,
       start_date: input.startDate,
       due_date: input.isMilestone ? input.startDate : input.dueDate,
-      created_by: user.id,
+      created_by: actorUserId,
       task_number,
       display_id,
     })
@@ -254,7 +282,7 @@ export async function createTask(input: {
     .single();
 
   if (error) throw new Error(error.message);
-  await logActivity(supabase, { orgId: input.orgId, taskId: created.id as string, type: "created", actorUserId: user.id });
+  await logActivity(supabase, { orgId: input.orgId, taskId: created.id as string, type: "created", actorUserId });
   revalidatePath("/dashboard");
   return created.id as string;
 }
@@ -2759,4 +2787,402 @@ export async function updateOrgDomain(orgId: string, domainRaw: string | null): 
     throw new Error(error.message);
   }
   revalidatePath("/dashboard");
+}
+
+/* ============================================================================
+   DEVELOPER TOOLS — a master org-wide "Developer mode" switch plus three
+   independently-toggleable sub-tools (components/dev-tools-panel.tsx):
+   1. User switch — an owner/admin can preview the app as another real
+      member or a dummy user (below), for testing role-gated UI and
+      workflow transitions without a second real account.
+   2. Dummy users — real users/org_members rows with no linked auth.users
+      entry (users.is_dummy — see that column's own comment in schema.sql),
+      so they're fully assignable/dropdown-visible but can never sign in.
+   3. Export & import project templates — a project's task structure (no
+      attachments, no assignees — see exportProjectTemplate's own comment)
+      as a portable JSON file, an easier repeatable alternative to hand-
+      editing seed.sql for spinning up a new pre-populated project.
+   All writes here are owner/admin-gated by hand (mirroring
+   updateMemberRole's own caller-role check), since dev_tools/dummy users
+   both need the service-role client for at least part of the write (no
+   insert/delete policy exists on users/org_members — see those tables' own
+   RLS comments), the same reason completeSignup/acceptInvite already use
+   it.
+============================================================================ */
+
+export async function updateDevTools(orgId: string, patch: Partial<DevTools>): Promise<void> {
+  const { supabase, user } = await requireUser();
+  const callerRole = await roleInOrg(supabase, orgId, user.id);
+  if (callerRole !== "owner" && callerRole !== "admin") throw new Error("Only an owner or admin can change this.");
+
+  const { data: orgRow } = await supabase.from("orgs").select("dev_tools").eq("id", orgId).maybeSingle();
+  const current = (orgRow?.dev_tools as Partial<DevTools> | null) ?? {};
+  const next: DevTools = {
+    enabled: patch.enabled ?? current.enabled ?? false,
+    userSwitch: patch.userSwitch ?? current.userSwitch ?? false,
+    dummyUsers: patch.dummyUsers ?? current.dummyUsers ?? false,
+    templates: patch.templates ?? current.templates ?? false,
+  };
+  const { error } = await supabase.from("orgs").update({ dev_tools: next }).eq("id", orgId);
+  if (error) throw new Error(error.message);
+  revalidatePath("/dashboard");
+}
+
+const DUMMY_ROLES: Role[] = ["owner", "admin", "manager", "authorizer", "standard"];
+
+// Real users/org_members rows (assignable, dropdown-visible, eligible for
+// any role) with no auth.users counterpart at all, so they structurally
+// can never sign in — service-role client for both inserts, since neither
+// table has an insert policy for the ordinary authenticated client (see
+// their own RLS comments in schema.sql). The caller's own role is checked
+// first, against the ordinary authenticated client, before anything
+// service-role happens.
+export async function createDummyUser(orgId: string, input: { name: string; role: Role }): Promise<string> {
+  const { supabase, user } = await requireUser();
+  const callerRole = await roleInOrg(supabase, orgId, user.id);
+  if (callerRole !== "owner" && callerRole !== "admin") throw new Error("Only an owner or admin can add a dummy user.");
+
+  const name = input.name.trim();
+  if (!name) throw new Error("Give the dummy user a name.");
+  if (!DUMMY_ROLES.includes(input.role)) throw new Error("Not a real role.");
+
+  const svc = createServiceRoleClient();
+  const id = crypto.randomUUID();
+  const { error: userError } = await svc.from("users").insert({
+    id,
+    email: `dummy-${id}@dev.invalid`,
+    name,
+    is_dummy: true,
+  });
+  if (userError) throw new Error(userError.message);
+
+  const { error: memberError } = await svc.from("org_members").insert({ org_id: orgId, user_id: id, role: input.role });
+  if (memberError) {
+    await svc.from("users").delete().eq("id", id);
+    throw new Error(memberError.message);
+  }
+
+  revalidatePath("/dashboard");
+  return id;
+}
+
+export async function deleteDummyUser(orgId: string, userId: string): Promise<void> {
+  const { supabase, user } = await requireUser();
+  const callerRole = await roleInOrg(supabase, orgId, user.id);
+  if (callerRole !== "owner" && callerRole !== "admin") throw new Error("Only an owner or admin can remove a dummy user.");
+
+  // Belt-and-suspenders: refuse to touch a row that isn't actually a dummy
+  // user, so this action can never become a backdoor for removing a real
+  // teammate from the org.
+  const { data: target } = await supabase.from("users").select("is_dummy").eq("id", userId).maybeSingle();
+  if (!target?.is_dummy) throw new Error("That isn't a dummy user.");
+
+  const svc = createServiceRoleClient();
+  await svc.from("org_members").delete().eq("org_id", orgId).eq("user_id", userId);
+  const { error } = await svc.from("users").delete().eq("id", userId);
+  if (error) throw new Error(error.message);
+  revalidatePath("/dashboard");
+}
+
+// ---- Project export/import templates ---------------------------------
+// A template captures a project's task *structure* only — titles,
+// descriptions, subtask nesting, milestone flag, tags, custom field
+// values, which named team each task sits on, dependency links between
+// included tasks, and dates stored as day-offsets from the template's own
+// earliest date (never absolute — "day 3" survives being imported next
+// month; an absolute date wouldn't). Deliberately excluded: assignee
+// (differs per org/team, forcing one would make a template less portable,
+// not more useful), every status (every imported task starts at the
+// target project's own workflow's first status — a template captures
+// structure, not a snapshot of progress), and everything attachment-like
+// (notes/files/sketches/checklists/code blocks) — matching "no
+// attachments or anything, just a set of tasks."
+export interface ProjectTemplateTaskV1 {
+  index: number;
+  parentIndex: number | null;
+  title: string;
+  description: string | null;
+  isMilestone: boolean;
+  startOffsetDays: number | null;
+  dueOffsetDays: number | null;
+  teamName: string | null;
+  tags: string[];
+  customFields: { name: string; fieldType: FormFieldType; options: string[] | null; value: unknown }[];
+}
+export interface ProjectTemplateLinkV1 {
+  fromIndex: number;
+  toIndex: number;
+  linkType: "blocked" | "blocks" | "concurrent" | "related" | "clone";
+}
+export interface ProjectTemplateV1 {
+  format: "alloy-project-template";
+  version: 1;
+  name: string;
+  color: string;
+  isHelpdesk: boolean;
+  tasks: ProjectTemplateTaskV1[];
+  links: ProjectTemplateLinkV1[];
+}
+
+export async function exportProjectTemplate(projectId: string): Promise<ProjectTemplateV1> {
+  const { supabase } = await requireUser();
+  const { data: project } = await supabase.from("projects").select("id, name, color, is_helpdesk").eq("id", projectId).maybeSingle();
+  if (!project) throw new Error("Project not found.");
+
+  const { data: taskRows } = await supabase
+    .from("tasks")
+    .select("id, parent_task_id, team_id, title, description, is_milestone, start_date, due_date")
+    .eq("project_id", projectId)
+    .eq("kind", "task")
+    .order("created_at", { ascending: true });
+  const tasks = taskRows ?? [];
+  if (!tasks.length) throw new Error("This project has no tasks to export yet.");
+
+  const taskIds = tasks.map((t) => t.id as string);
+  const indexById = new Map(tasks.map((t, i) => [t.id as string, i]));
+
+  const [{ data: teamRows }, { data: tagRows }, { data: fieldValueRows }, { data: linkRows }] = await Promise.all([
+    supabase.from("teams").select("id, name").eq("project_id", projectId),
+    supabase.from("task_tags").select("task_id, tags ( name )").in("task_id", taskIds),
+    supabase.from("custom_field_values").select("task_id, value, custom_field_defs ( name, field_type, options )").in("task_id", taskIds),
+    supabase.from("task_links").select("from_task_id, to_task_id, link_type").in("from_task_id", taskIds).in("to_task_id", taskIds),
+  ]);
+
+  const teamNameById = new Map((teamRows ?? []).map((t: any) => [t.id as string, t.name as string]));
+
+  const tagsByTask = new Map<string, string[]>();
+  (tagRows ?? []).forEach((r: any) => {
+    const name = r.tags?.name;
+    if (!name) return;
+    const list = tagsByTask.get(r.task_id) ?? [];
+    list.push(name);
+    tagsByTask.set(r.task_id, list);
+  });
+
+  const fieldsByTask = new Map<string, ProjectTemplateTaskV1["customFields"]>();
+  (fieldValueRows ?? []).forEach((r: any) => {
+    const def = r.custom_field_defs;
+    if (!def) return;
+    const list = fieldsByTask.get(r.task_id) ?? [];
+    list.push({ name: def.name, fieldType: def.field_type, options: def.options ?? null, value: r.value });
+    fieldsByTask.set(r.task_id, list);
+  });
+
+  // Dates as offsets from the earliest start_date in the template, not
+  // absolute — see this section's own header comment above for why.
+  const dateNums = tasks
+    .map((t) => t.start_date as string | null)
+    .filter((d): d is string => !!d)
+    .map((d) => Date.parse(`${d}T00:00:00Z`));
+  const anchor = dateNums.length ? Math.min(...dateNums) : null;
+  function offsetOf(dateStr: string | null): number | null {
+    if (!dateStr || anchor === null) return null;
+    return Math.round((Date.parse(`${dateStr}T00:00:00Z`) - anchor) / 86400000);
+  }
+
+  const exportedTasks: ProjectTemplateTaskV1[] = tasks.map((t, i) => ({
+    index: i,
+    parentIndex: t.parent_task_id ? indexById.get(t.parent_task_id as string) ?? null : null,
+    title: t.title as string,
+    description: (t.description as string | null) ?? null,
+    isMilestone: !!t.is_milestone,
+    startOffsetDays: offsetOf(t.start_date as string | null),
+    dueOffsetDays: offsetOf(t.due_date as string | null),
+    teamName: t.team_id ? teamNameById.get(t.team_id as string) ?? null : null,
+    tags: tagsByTask.get(t.id as string) ?? [],
+    customFields: fieldsByTask.get(t.id as string) ?? [],
+  }));
+
+  const exportedLinks: ProjectTemplateLinkV1[] = (linkRows ?? [])
+    .map((l: any) => ({
+      fromIndex: indexById.get(l.from_task_id as string),
+      toIndex: indexById.get(l.to_task_id as string),
+      linkType: l.link_type as ProjectTemplateLinkV1["linkType"],
+    }))
+    .filter((l): l is ProjectTemplateLinkV1 => l.fromIndex !== undefined && l.toIndex !== undefined);
+
+  return {
+    format: "alloy-project-template",
+    version: 1,
+    name: project.name as string,
+    color: project.color as string,
+    isHelpdesk: !!project.is_helpdesk,
+    tasks: exportedTasks,
+    links: exportedLinks,
+  };
+}
+
+function addDaysUTC(baseIso: string, days: number): string {
+  const d = new Date(`${baseIso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + Math.round(days));
+  return d.toISOString().slice(0, 10);
+}
+
+// Re-creates a whole project from an exportProjectTemplate() file: a new
+// project (reusing createProject's own workflow-auto-pick and tag-auto-
+// derive logic — every imported task starts at that workflow's first
+// status, matching "a template captures structure, not progress" above),
+// any referenced tag/custom-field-def/team that doesn't already exist in
+// this org (created on the fly, same as typing a new tag into a task
+// normally would), then every task, its tags/field values, its subtask
+// nesting, and its dependency links — all keyed by the template's own
+// index numbers rather than the source org's real ids, which never travel.
+export async function importProjectTemplate(
+  orgId: string,
+  template: ProjectTemplateV1,
+  opts: { name: string; color: string; startDate: string }
+): Promise<string> {
+  const { supabase, user } = await requireUser();
+  if (template?.format !== "alloy-project-template" || template?.version !== 1) {
+    throw new Error("That doesn't look like an Alloy project template file.");
+  }
+  if (!Array.isArray(template.tasks) || !template.tasks.length) {
+    throw new Error("This template has no tasks in it.");
+  }
+  const name = opts.name.trim() || template.name || "Imported project";
+  const color = opts.color || template.color || "#f97316";
+  const startDate = /^\d{4}-\d{2}-\d{2}$/.test(opts.startDate) ? opts.startDate : new Date().toISOString().slice(0, 10);
+
+  const projectId = await createProject(orgId, {
+    name,
+    color,
+    isHelpdesk: !!template.isHelpdesk,
+    enableAllocations: false,
+  });
+
+  const { data: projectRow } = await supabase.from("projects").select("workflow_id").eq("id", projectId).maybeSingle();
+  if (!projectRow?.workflow_id) throw new Error("The new project has no workflow — nothing to import tasks into.");
+  const { data: firstStatus } = await supabase
+    .from("workflow_statuses")
+    .select("id")
+    .eq("workflow_id", projectRow.workflow_id)
+    .order("position")
+    .limit(1)
+    .single();
+  if (!firstStatus) throw new Error("That workflow has no statuses configured.");
+
+  // Teams — the new project already has an auto-created "General" team
+  // (createProject's own doing); only create the ones this template
+  // references that aren't already there by name.
+  const teamNameToId = new Map<string, string>();
+  const { data: existingTeams } = await supabase.from("teams").select("id, name").eq("project_id", projectId);
+  (existingTeams ?? []).forEach((t: any) => teamNameToId.set(t.name, t.id));
+  for (const teamName of new Set(template.tasks.map((t) => t.teamName).filter((n): n is string => !!n))) {
+    if (teamNameToId.has(teamName)) continue;
+    const { data: created, error } = await supabase
+      .from("teams")
+      .insert({ org_id: orgId, project_id: projectId, name: teamName, color })
+      .select("id")
+      .single();
+    if (error) throw new Error(error.message);
+    teamNameToId.set(teamName, created.id as string);
+  }
+
+  // Tags are org-wide — reuse an existing one by (lowercased) name, create
+  // whatever's missing, same normalization addTag already uses.
+  const tagNameToId = new Map<string, string>();
+  const allTagNames = new Set<string>();
+  template.tasks.forEach((t) => t.tags.forEach((tag) => allTagNames.add(tag.trim().toLowerCase())));
+  if (allTagNames.size) {
+    const { data: existingTags } = await supabase.from("tags").select("id, name").eq("org_id", orgId).in("name", Array.from(allTagNames));
+    (existingTags ?? []).forEach((t: any) => tagNameToId.set(t.name, t.id));
+    for (const tagName of allTagNames) {
+      if (tagNameToId.has(tagName)) continue;
+      const { data: created, error } = await supabase.from("tags").insert({ org_id: orgId, name: tagName }).select("id").single();
+      if (error) throw new Error(error.message);
+      tagNameToId.set(tagName, created.id as string);
+    }
+  }
+
+  // Custom field defs are org-wide too — matched by (name, field_type)
+  // together, since two orgs' idea of "Priority" could be a select field
+  // in one template and something else entirely in another.
+  const fieldDefIdByKey = new Map<string, string>();
+  const neededFields = new Map<string, { name: string; fieldType: FormFieldType; options: string[] | null }>();
+  template.tasks.forEach((t) =>
+    t.customFields.forEach((f) => neededFields.set(`${f.name}::${f.fieldType}`, { name: f.name, fieldType: f.fieldType, options: f.options }))
+  );
+  if (neededFields.size) {
+    const { data: existingDefs } = await supabase.from("custom_field_defs").select("id, name, field_type").eq("org_id", orgId);
+    (existingDefs ?? []).forEach((d: any) => fieldDefIdByKey.set(`${d.name}::${d.field_type}`, d.id));
+    for (const [key, f] of neededFields) {
+      if (fieldDefIdByKey.has(key)) continue;
+      const newId = await createCustomFieldDef(orgId, { name: f.name, field_type: f.fieldType, options: f.options ?? undefined });
+      fieldDefIdByKey.set(key, newId);
+    }
+  }
+
+  // Tasks — one at a time (not a single bulk insert) so each gets its own
+  // atomically-assigned display_id via assignDisplayId, same as every
+  // other task-creation path in this file.
+  const newIds: string[] = [];
+  for (const t of template.tasks) {
+    const { task_number, display_id } = await assignDisplayId(supabase, projectId);
+    const { data: created, error } = await supabase
+      .from("tasks")
+      .insert({
+        org_id: orgId,
+        project_id: projectId,
+        team_id: t.teamName ? teamNameToId.get(t.teamName) ?? null : null,
+        title: t.title,
+        description: t.description,
+        status_id: firstStatus.id,
+        assignee_id: null,
+        is_milestone: t.isMilestone,
+        start_date: t.startOffsetDays === null ? null : addDaysUTC(startDate, t.startOffsetDays),
+        due_date: t.dueOffsetDays === null ? null : addDaysUTC(startDate, t.dueOffsetDays),
+        created_by: user.id,
+        task_number,
+        display_id,
+      })
+      .select("id")
+      .single();
+    if (error) throw new Error(error.message);
+    newIds.push(created.id as string);
+  }
+
+  // Second pass: subtask nesting, now that every task has a real id.
+  for (let i = 0; i < template.tasks.length; i++) {
+    const parentIndex = template.tasks[i].parentIndex;
+    if (parentIndex === null || parentIndex === undefined) continue;
+    const parentId = newIds[parentIndex];
+    if (!parentId) continue;
+    await supabase.from("tasks").update({ parent_task_id: parentId }).eq("id", newIds[i]);
+  }
+
+  // Tags, custom field values, and dependency links — all keyed by index,
+  // all batched in one insert each rather than per-row round trips.
+  const tagRows: { task_id: string; tag_id: string }[] = [];
+  const fieldValueRows: { task_id: string; field_def_id: string; value: unknown }[] = [];
+  template.tasks.forEach((t, i) => {
+    t.tags.forEach((tag) => {
+      const tagId = tagNameToId.get(tag.trim().toLowerCase());
+      if (tagId) tagRows.push({ task_id: newIds[i], tag_id: tagId });
+    });
+    t.customFields.forEach((f) => {
+      const fieldId = fieldDefIdByKey.get(`${f.name}::${f.fieldType}`);
+      if (fieldId && f.value !== null && f.value !== undefined && f.value !== "") {
+        fieldValueRows.push({ task_id: newIds[i], field_def_id: fieldId, value: f.value });
+      }
+    });
+  });
+  if (tagRows.length) {
+    const { error } = await supabase.from("task_tags").insert(tagRows);
+    if (error) throw new Error(error.message);
+  }
+  if (fieldValueRows.length) {
+    const { error } = await supabase.from("custom_field_values").insert(fieldValueRows);
+    if (error) throw new Error(error.message);
+  }
+
+  const linkRows = (template.links ?? [])
+    .map((l) => ({ org_id: orgId, from_task_id: newIds[l.fromIndex], to_task_id: newIds[l.toIndex], link_type: l.linkType }))
+    .filter((l) => l.from_task_id && l.to_task_id);
+  if (linkRows.length) {
+    const { error } = await supabase.from("task_links").insert(linkRows);
+    if (error) throw new Error(error.message);
+  }
+
+  revalidatePath("/dashboard");
+  return projectId;
 }

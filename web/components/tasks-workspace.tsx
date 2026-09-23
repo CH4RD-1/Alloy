@@ -25,6 +25,7 @@ import type {
   Contact,
   Invite,
   SubscriptionStatus,
+  DevTools,
 } from "@/lib/types";
 import type { MemberSummary } from "@/lib/tasks-data";
 import { TaskListView } from "@/components/task-list-view";
@@ -46,6 +47,7 @@ import { CustomFieldsPanel } from "@/components/custom-fields-panel";
 import { WorkflowPanel } from "@/components/workflow-panel";
 import { OrgSettingsPanel } from "@/components/org-settings-panel";
 import { SlaSettingsPanel } from "@/components/sla-settings-panel";
+import { DevToolsPanel } from "@/components/dev-tools-panel";
 import { AppSidebar } from "@/components/app-sidebar";
 import { ALL_PROJECTS_KEY, matchesProjectTeamFilters } from "@/lib/sidebar-view";
 
@@ -152,6 +154,7 @@ export function TasksWorkspace({
   teamMemberIdsByTeam,
   slaFirstResponseHours,
   slaResolutionDays,
+  devTools,
 }: {
   rows: TaskRow[];
   links: TaskLink[];
@@ -193,6 +196,7 @@ export function TasksWorkspace({
   teamMemberIdsByTeam: Map<string, string[]>;
   slaFirstResponseHours: number;
   slaResolutionDays: number;
+  devTools: DevTools;
 }) {
   const [view, setView] = useState<ViewKey>("dashboard");
   const [search, setSearch] = useState("");
@@ -218,8 +222,39 @@ export function TasksWorkspace({
   const [managingWorkflow, setManagingWorkflow] = useState(false);
   const [managingOrg, setManagingOrg] = useState(false);
   const [managingSla, setManagingSla] = useState(false);
+  const [managingDev, setManagingDev] = useState(false);
   const [projectFilter, setProjectFilter] = useState<string>(ALL_PROJECTS_KEY);
   const [teamFilters, setTeamFilters] = useState<Set<string>>(new Set());
+
+  // Dev tools "Viewing as" (components/dev-tools-panel.tsx / app-sidebar.tsx)
+  // — a client-only override of who the app renders as, never sent to the
+  // server except as an explicit actingAsUserId on the handful of actions
+  // that support it (createTask, updateTaskStatus). Persisted per-browser
+  // (not per-org-shared state) so it survives a reload while testing, but
+  // resets on its own once the org turns dev tools off (the effect below).
+  const [viewingAs, setViewingAsState] = useState<{ id: string; name: string; role: Role } | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = window.localStorage.getItem(`alloy-viewing-as-${orgId}`);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
+  function setViewingAs(next: { id: string; name: string; role: Role } | null) {
+    setViewingAsState(next);
+    try {
+      if (next) window.localStorage.setItem(`alloy-viewing-as-${orgId}`, JSON.stringify(next));
+      else window.localStorage.removeItem(`alloy-viewing-as-${orgId}`);
+    } catch {
+      // Best-effort — a private window or blocked storage just means this
+      // doesn't survive a reload, not a reason to fail the switch itself.
+    }
+  }
+  const userSwitchActive = devTools.enabled && devTools.userSwitch;
+  const effectiveUserId = (userSwitchActive && viewingAs) ? viewingAs.id : currentUserId;
+  const effectiveUserRole = (userSwitchActive && viewingAs) ? viewingAs.role : currentUserRole;
+  const actingAsUserId = userSwitchActive && viewingAs ? viewingAs.id : null;
 
   const allRows = useMemo(() => flattenRows(rows), [rows]);
 
@@ -314,6 +349,13 @@ export function TasksWorkspace({
         onManageWorkflow={() => setManagingWorkflow(true)}
         onManageOrg={() => setManagingOrg(true)}
         onManageSla={() => setManagingSla(true)}
+        onManageDev={() => setManagingDev(true)}
+        devTools={devTools}
+        members={members}
+        realUserId={currentUserId}
+        realUserRole={currentUserRole}
+        viewingAs={viewingAs}
+        onViewingAsChange={setViewingAs}
       />
       <div className="main-content">
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
@@ -359,9 +401,9 @@ export function TasksWorkspace({
           projects={projects}
           statuses={statuses}
           transitions={transitions}
-          currentUserId={currentUserId}
-          currentUserRole={currentUserRole}
-          currentUserName={members.find((m) => m.userId === currentUserId)?.name ?? "there"}
+          currentUserId={effectiveUserId}
+          currentUserRole={effectiveUserRole}
+          currentUserName={(userSwitchActive && viewingAs) ? viewingAs.name : (members.find((m) => m.userId === currentUserId)?.name ?? "there")}
           vocabTask={vocabTask}
           activityLog={activityLog}
           onSelectTask={setSelectedTaskId}
@@ -434,7 +476,8 @@ export function TasksWorkspace({
           projects={projects}
           members={members}
           orgId={orgId}
-          currentUserRole={currentUserRole}
+          currentUserRole={effectiveUserRole}
+          actingAsUserId={actingAsUserId}
           docs={docs}
           docIdsByTask={docIdsByTask}
           taskObjects={taskObjects}
@@ -538,6 +581,7 @@ export function TasksWorkspace({
           vocabTask={vocabTask}
           orgTeamAllocationEnabled={orgTeamAllocationEnabled}
           teamMemberIdsByTeam={teamMemberIdsByTeam}
+          actingAsUserId={actingAsUserId}
           onClose={() => setCreating(false)}
         />
       )}
@@ -594,7 +638,7 @@ export function TasksWorkspace({
           statuses={statuses}
           transitions={transitions}
           members={members}
-          currentUserRole={currentUserRole}
+          currentUserRole={effectiveUserRole}
           vocabTask={vocabTask}
           invites={invites}
           onClose={() => setManagingWorkflow(false)}
@@ -611,7 +655,7 @@ export function TasksWorkspace({
           orgStripePriceId={orgStripePriceId}
           orgSubscriptionPeriodEnd={orgSubscriptionPeriodEnd}
           orgTeamAllocationEnabled={orgTeamAllocationEnabled}
-          currentUserRole={currentUserRole}
+          currentUserRole={effectiveUserRole}
           onClose={() => setManagingOrg(false)}
         />
       )}
@@ -621,8 +665,19 @@ export function TasksWorkspace({
           orgId={orgId}
           slaFirstResponseHours={slaFirstResponseHours}
           slaResolutionDays={slaResolutionDays}
-          currentUserRole={currentUserRole}
+          currentUserRole={effectiveUserRole}
           onClose={() => setManagingSla(false)}
+        />
+      )}
+
+      {managingDev && (
+        <DevToolsPanel
+          orgId={orgId}
+          currentUserRole={currentUserRole}
+          devTools={devTools}
+          members={members}
+          projects={projects}
+          onClose={() => setManagingDev(false)}
         />
       )}
       </div>

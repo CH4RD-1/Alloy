@@ -221,6 +221,7 @@ export function TaskPanel({
   slaFirstResponseHours,
   slaResolutionDays,
   assets,
+  actingAsUserId,
   onOpenAsset,
   onSelectDoc,
   onWidthChange,
@@ -253,6 +254,11 @@ export function TaskPanel({
   slaFirstResponseHours: number;
   slaResolutionDays: number;
   assets: Asset[];
+  // Dev tools "View as" (components/dev-tools-panel.tsx) — when set, any
+  // status change or subtask this panel creates is attributed (activity
+  // log) to this identity instead of the real signed-in account. Null/
+  // undefined when viewing as yourself, the normal case.
+  actingAsUserId?: string | null;
   onOpenAsset: (assetId: string) => void;
   // Opens the linked doc's own panel beside this one (double-width, see
   // .panel-doc in globals.css) without closing this task's panel — omit to
@@ -418,7 +424,7 @@ export function TaskPanel({
                       className="move-btn"
                       disabled={!allowed || pending}
                       title={allowed ? undefined : "Your role can't make this move"}
-                      onClick={() => run(() => updateTaskStatus(taskId, t.to_status_id))}
+                      onClick={() => run(() => updateTaskStatus(taskId, t.to_status_id, actingAsUserId))}
                     >
                       → {toStatus?.label}
                     </button>
@@ -710,6 +716,7 @@ export function TaskPanel({
                     isMilestone: false,
                     startDate: null,
                     dueDate: null,
+                    actingAsUserId,
                   })
                 )
               }

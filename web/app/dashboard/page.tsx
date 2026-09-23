@@ -81,6 +81,7 @@ export default async function DashboardPage() {
         slaFirstResponseHours={data.slaFirstResponseHours}
         slaResolutionDays={data.slaResolutionDays}
         teamMemberIdsByTeam={data.teamMemberIdsByTeam}
+        devTools={data.devTools}
       />
     </main>
   );
