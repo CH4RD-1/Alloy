@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { TaskRow } from "@/lib/list-view";
-import { hueFor, initials } from "@/lib/list-view";
+import { hueFor, initials, fmtDate, MAX_TASK_DEPTH } from "@/lib/list-view";
 import type {
   WorkflowStatus,
   WorkflowTransition,
@@ -702,25 +702,33 @@ export function TaskPanel({
                 <span className="row-title">{c.task.title}</span>
               </div>
             ))}
-            <NewSubtaskInline
-              disabled={pending}
-              onCreate={(title) =>
-                run(() =>
-                  createTask({
-                    orgId,
-                    projectId: task.project_id,
-                    teamId: task.team_id,
-                    parentTaskId: taskId,
-                    title,
-                    assigneeId: null,
-                    isMilestone: false,
-                    startDate: null,
-                    dueDate: null,
-                    actingAsUserId,
-                  })
-                )
-              }
-            />
+            {row.depth < MAX_TASK_DEPTH ? (
+              <NewSubtaskForm
+                disabled={pending}
+                parentStart={task.start_date}
+                parentDue={task.due_date}
+                onCreate={(input) =>
+                  run(() =>
+                    createTask({
+                      orgId,
+                      projectId: task.project_id,
+                      teamId: task.team_id,
+                      parentTaskId: taskId,
+                      title: input.title,
+                      assigneeId: null,
+                      isMilestone: input.isMilestone,
+                      startDate: input.startDate,
+                      dueDate: input.dueDate,
+                      actingAsUserId,
+                    })
+                  )
+                }
+              />
+            ) : (
+              <p style={{ color: "var(--text-faint)", fontSize: 12 }}>
+                Subtasks can&apos;t be nested any further.
+              </p>
+            )}
           </div>
 
           <div className="divider" />
@@ -1504,23 +1512,295 @@ function YesNoControl({ value, onChange }: { value: boolean; onChange: (value: b
   );
 }
 
-function NewSubtaskInline({ onCreate, disabled }: { onCreate: (title: string) => void; disabled?: boolean }) {
-  const [value, setValue] = useState("");
+// A small inline calendar popover used only by the new-subtask date
+// fields below — not a replacement for the plain native <input type=date>
+// used everywhere else in this panel (those stay exactly as they were).
+// This exists purely because a native date input's own picker can't be
+// customized to shade specific days, and the whole point here is to show
+// the parent task's current [start, due] range as a visual guide while
+// picking a new subtask's dates — "no subtask should exist outside its
+// parent's duration" is much easier to keep in mind with the parent's own
+// range highlighted right on the calendar you're picking from.
+function MiniCalendarPopover({
+  value,
+  guideStart,
+  guideDue,
+  onSelect,
+  onClose,
+}: {
+  value: string; // "" or yyyy-mm-dd
+  guideStart: string | null;
+  guideDue: string | null;
+  onSelect: (iso: string) => void;
+  onClose: () => void;
+}) {
+  const anchor = parseDateOnly(value) ?? parseDateOnly(guideStart ?? "") ?? new Date();
+  const [viewYear, setViewYear] = useState(anchor.getUTCFullYear());
+  const [viewMonth, setViewMonth] = useState(anchor.getUTCMonth()); // 0-11
+
+  const first = new Date(Date.UTC(viewYear, viewMonth, 1));
+  const startWeekday = (first.getUTCDay() + 6) % 7; // Monday-first grid
+  const daysInMonth = new Date(Date.UTC(viewYear, viewMonth + 1, 0)).getUTCDate();
+  const monthLabel = first.toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
+
+  function goMonth(delta: number) {
+    let m = viewMonth + delta;
+    let y = viewYear;
+    if (m < 0) {
+      m = 11;
+      y -= 1;
+    } else if (m > 11) {
+      m = 0;
+      y += 1;
+    }
+    setViewMonth(m);
+    setViewYear(y);
+  }
+
+  function isoFor(day: number): string {
+    return formatDateOnly(new Date(Date.UTC(viewYear, viewMonth, day)));
+  }
+  function inGuideRange(iso: string): boolean {
+    return !!guideStart && !!guideDue && iso >= guideStart && iso <= guideDue;
+  }
+
+  const cells: (number | null)[] = Array(startWeekday).fill(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
   return (
-    <div className="add-inline">
+    <div className="mini-calendar-popover" onClick={(e) => e.stopPropagation()}>
+      <div className="mini-calendar-head">
+        <button type="button" className="mini-calendar-nav" onClick={() => goMonth(-1)} aria-label="Previous month">
+          ‹
+        </button>
+        <span>{monthLabel}</span>
+        <button type="button" className="mini-calendar-nav" onClick={() => goMonth(1)} aria-label="Next month">
+          ›
+        </button>
+      </div>
+      {guideStart && guideDue && (
+        <div className="mini-calendar-guide-note">
+          <span className="mini-calendar-guide-swatch" /> Parent: {fmtDate(guideStart)} → {fmtDate(guideDue)}
+        </div>
+      )}
+      <div className="mini-calendar-weekdays">
+        {["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map((d) => (
+          <span key={d}>{d}</span>
+        ))}
+      </div>
+      <div className="mini-calendar-grid">
+        {cells.map((day, i) => {
+          if (day === null) return <span key={`e${i}`} className="mini-calendar-cell empty" />;
+          const iso = isoFor(day);
+          return (
+            <button
+              key={iso}
+              type="button"
+              className={`mini-calendar-cell ${inGuideRange(iso) ? "guided" : ""} ${iso === value ? "selected" : ""}`}
+              onClick={() => {
+                onSelect(iso);
+                onClose();
+              }}
+            >
+              {day}
+            </button>
+          );
+        })}
+      </div>
+      <div className="mini-calendar-foot">
+        <button
+          type="button"
+          className="mini-calendar-foot-btn"
+          onClick={() => {
+            onSelect(formatDateOnly(new Date()));
+            onClose();
+          }}
+        >
+          Today
+        </button>
+        <button
+          type="button"
+          className="mini-calendar-foot-btn"
+          onClick={() => {
+            onSelect("");
+            onClose();
+          }}
+        >
+          Clear
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// A Start/Due box matching the panel's existing .date-box look (see the
+// task's own Dates field-group above), but backed by MiniCalendarPopover
+// instead of a native <input type=date> — see that component's own
+// comment for why. Closes on an outside click, same convention as the
+// Gantt's floating link-menu.
+function DateGuideField({
+  label,
+  value,
+  onChange,
+  guideStart,
+  guideDue,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  guideStart: string | null;
+  guideDue: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDocMouseDown(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [open]);
+
+  return (
+    <div className="date-box date-guide-field" ref={containerRef}>
+      <span className="date-box-label">{label}</span>
+      <button type="button" className="text-input date-guide-trigger" onClick={() => setOpen((o) => !o)}>
+        {value ? fmtDate(value) : "Select date"}
+      </button>
+      {open && (
+        <MiniCalendarPopover value={value} guideStart={guideStart} guideDue={guideDue} onSelect={onChange} onClose={() => setOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+// The "+ Add subtask" row — starts off as just the plain title input
+// (unchanged from before), and reveals a Dates section below it once the
+// input is focused: a Milestone checkbox, Start/Due (or a single date, for
+// a milestone) via DateGuideField above, a Duration box mirroring the
+// task's own (amount + unit, computed against Start), and an explicit
+// "Add Subtask" button. Start/Due default to the parent task's own current
+// dates — a new subtask starts out already inside its parent's range
+// unless the user changes it. Plain Enter in the title field (without
+// ever opening the dates section) still creates a bare, dateless subtask
+// immediately, matching the original one-line shortcut.
+function NewSubtaskForm({
+  onCreate,
+  disabled,
+  parentStart,
+  parentDue,
+}: {
+  onCreate: (input: { title: string; isMilestone: boolean; startDate: string | null; dueDate: string | null }) => void;
+  disabled?: boolean;
+  parentStart: string | null;
+  parentDue: string | null;
+}) {
+  const [title, setTitle] = useState("");
+  const [active, setActive] = useState(false);
+  const [isMilestone, setIsMilestone] = useState(false);
+  const [startDate, setStartDate] = useState(parentStart ?? "");
+  const [dueDate, setDueDate] = useState(parentDue ?? "");
+  const [durationAmount, setDurationAmount] = useState("");
+  const [durationUnit, setDurationUnit] = useState<DurationUnit>("days");
+
+  function reset() {
+    setTitle("");
+    setActive(false);
+    setIsMilestone(false);
+    setStartDate(parentStart ?? "");
+    setDueDate(parentDue ?? "");
+    setDurationAmount("");
+    setDurationUnit("days");
+  }
+
+  function submit() {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    onCreate({
+      title: trimmed,
+      isMilestone,
+      startDate: startDate || null,
+      dueDate: isMilestone ? startDate || null : dueDate || null,
+    });
+    reset();
+  }
+
+  function applyDuration(nextAmount: string, nextUnit: DurationUnit) {
+    setDurationAmount(nextAmount);
+    setDurationUnit(nextUnit);
+    if (nextAmount === "" || !startDate) return;
+    const value = Number(nextAmount);
+    if (!Number.isFinite(value) || value < 0) return;
+    setDueDate(addDurationToDate(startDate, value, nextUnit));
+  }
+
+  return (
+    <div className="add-inline-with-dates">
       <input
         className="text-input"
         placeholder="+ Add subtask, press Enter…"
-        value={value}
+        value={title}
         disabled={disabled}
-        onChange={(e) => setValue(e.target.value)}
+        onFocus={() => setActive(true)}
+        onChange={(e) => setTitle(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && value.trim()) {
-            onCreate(value.trim());
-            setValue("");
-          }
+          if (e.key === "Enter" && title.trim() && !active) submit();
         }}
       />
+      {active && (
+        <div className="new-subtask-dates">
+          <label className="checkbox-row" style={{ marginBottom: 8 }}>
+            <input type="checkbox" checked={isMilestone} onChange={(e) => setIsMilestone(e.target.checked)} />
+            Milestone
+          </label>
+          {isMilestone ? (
+            <DateGuideField label="Date" value={startDate} onChange={setStartDate} guideStart={parentStart} guideDue={parentDue} />
+          ) : (
+            <>
+              <div className="date-box-row">
+                <DateGuideField label="Start" value={startDate} onChange={setStartDate} guideStart={parentStart} guideDue={parentDue} />
+                <DateGuideField label="Due" value={dueDate} onChange={setDueDate} guideStart={parentStart} guideDue={parentDue} />
+              </div>
+              <div className="duration-box">
+                <span className="duration-box-label">Duration</span>
+                <div className="duration-box-controls">
+                  <input
+                    type="number"
+                    min={0}
+                    className="text-input duration-input"
+                    placeholder={startDate ? "0" : "Set a start date first"}
+                    disabled={!startDate}
+                    value={durationAmount}
+                    onChange={(e) => applyDuration(e.target.value, durationUnit)}
+                  />
+                  <select
+                    className="select-input duration-unit-select"
+                    value={durationUnit}
+                    disabled={!startDate}
+                    onChange={(e) => applyDuration(durationAmount, e.target.value as DurationUnit)}
+                  >
+                    {DURATION_UNITS.map((u) => (
+                      <option key={u.value} value={u.value}>
+                        {u.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </>
+          )}
+          <div className="new-subtask-actions">
+            <button type="button" className="small-btn" disabled={disabled || !title.trim()} onClick={submit}>
+              Add Subtask
+            </button>
+            <button type="button" className="small-btn ghost-btn" onClick={reset}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

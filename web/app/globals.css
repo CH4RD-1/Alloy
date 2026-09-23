@@ -314,6 +314,12 @@ html {
   height: 38px;
   background: color-mix(in srgb, var(--surface-2) 45%, var(--surface));
 }
+.list-row.sub-sub-row {
+  background: color-mix(in srgb, var(--surface-2) 70%, var(--surface));
+}
+.row-indent {
+  flex: 0 0 auto;
+}
 .cell-title {
   display: flex;
   align-items: center;
@@ -867,6 +873,141 @@ textarea.text-input {
 .add-inline select {
   flex: 1;
 }
+
+/* ============ NEW-SUBTASK DATES + MINI CALENDAR GUIDE ============ */
+.add-inline-with-dates {
+  margin-top: 8px;
+}
+.add-inline-with-dates > input.text-input {
+  width: 100%;
+}
+.new-subtask-dates {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.new-subtask-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.date-guide-field {
+  position: relative;
+}
+.date-guide-trigger {
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+.mini-calendar-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  width: 220px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 10px;
+}
+.mini-calendar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.mini-calendar-nav {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.mini-calendar-nav:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.mini-calendar-guide-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+}
+.mini-calendar-guide-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  flex: 0 0 auto;
+}
+.mini-calendar-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  font-size: 9.5px;
+  color: var(--text-faint);
+  text-align: center;
+  margin-bottom: 2px;
+}
+.mini-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+.mini-calendar-cell {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+}
+.mini-calendar-cell.empty {
+  cursor: default;
+}
+.mini-calendar-cell:not(.empty):hover {
+  background: var(--surface-3);
+}
+.mini-calendar-cell.guided {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.mini-calendar-cell.selected {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 700;
+}
+.mini-calendar-foot {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.mini-calendar-foot-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.mini-calendar-foot-btn:hover {
+  color: var(--text);
+}
 .small-btn {
   background: var(--surface-3);
   border: 1px solid var(--border-strong);
@@ -1077,6 +1218,9 @@ textarea.text-input {
 .gantt-label-row.sub {
   padding-left: 26px;
   color: var(--text-muted);
+}
+.gantt-label-row.subsub {
+  padding-left: 44px;
 }
 .gantt-label-row .row-title {
   font-size: 12px;

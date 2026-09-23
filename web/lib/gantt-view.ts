@@ -18,7 +18,11 @@ import { addDays, daysBetween } from "./gantt-schedule";
 
 export interface GanttRow {
   row: TaskRow;
-  sub: boolean;
+  // 0 = a top-level task's own row, 1 = a subtask's row, 2 = a
+  // sub-subtask's row (the deepest MAX_TASK_DEPTH allows — see
+  // list-view.ts). Superseded the old boolean `sub` flag now that a
+  // subtask can have its own expandable children.
+  depth: number;
 }
 
 // Helpdesk-project tasks are unscheduled and never appear on the Gantt (see
@@ -41,12 +45,19 @@ export function buildGanttRows(params: { rows: TaskRow[]; projects: Project[]; e
     .filter((r) => !helpdeskProjectIds.has(r.task.project_id))
     .sort((a, b) => a.task.position - b.task.position);
   const out: GanttRow[] = [];
-  visible.forEach((r) => {
-    out.push({ row: r, sub: false });
+  // Recursive: a row's own children only ever get pushed while that row's
+  // own id is in `expanded` — same Set for every depth, so a subtask
+  // that's collapsed hides its own sub-subtasks exactly like a collapsed
+  // top-level task hides its subtasks (and, transitively, a collapsed
+  // top-level task's sub-subtasks stay hidden too, since their subtask
+  // parent never gets visited).
+  const pushRow = (r: TaskRow, depth: number) => {
+    out.push({ row: r, depth });
     if (expanded.has(r.task.id)) {
-      (r.children ?? []).forEach((c) => out.push({ row: c, sub: true }));
+      (r.children ?? []).forEach((c) => pushRow(c, depth + 1));
     }
-  });
+  };
+  visible.forEach((r) => pushRow(r, 0));
   return out;
 }
 
@@ -145,8 +156,8 @@ export function computeGanttLayout(rows: GanttRow[], todayIso: string, minWidthP
 
   const geom: Geom[] = rows.map((r, i) => {
     const t = r.row.task;
-    const y = HEADER_H + i * ROW_H + (r.sub ? 7 : 5);
-    const h = r.sub ? 18 : 22;
+    const y = HEADER_H + i * ROW_H + (r.depth > 0 ? 7 : 5);
+    const h = r.depth > 0 ? 18 : 22;
     const nodeCY = y + h / 2;
     if (t.is_milestone) {
       const s = 7;

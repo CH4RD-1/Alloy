@@ -106,23 +106,31 @@ export function Avatar({ name }: { name: string | null }) {
   );
 }
 
+// depth: 0 = a top-level task's own row, 1 = a subtask's row, 2 = a
+// sub-subtask's row (the deepest MAX_TASK_DEPTH allows — see list-view.ts).
+// A row at any depth can show its own expand chevron now, not just
+// top-level rows, since buildRows() populates `children` recursively.
 function RowLine({
   row,
-  isSub,
+  depth,
   expanded,
   onToggle,
   onSelect,
 }: {
   row: TaskRow;
-  isSub: boolean;
+  depth: number;
   expanded?: boolean;
   onToggle?: () => void;
   onSelect?: () => void;
 }) {
-  const hasChildren = !isSub && !!row.children?.length;
+  const hasChildren = !!row.children?.length;
   return (
-    <div className={`list-row ${isSub ? "sub-row" : "parent-row"}`} onClick={onSelect}>
+    <div
+      className={`list-row ${depth > 0 ? "sub-row" : "parent-row"} ${depth > 1 ? "sub-sub-row" : ""}`}
+      onClick={onSelect}
+    >
       <div className="cell-title">
+        {depth > 0 && <span className="row-indent" style={{ width: (depth - 1) * 16 }} />}
         {hasChildren ? (
           <button
             type="button"
@@ -189,20 +197,25 @@ function RowLine({
   );
 }
 
-function TopRow({ row, onSelectTask }: { row: TaskRow; onSelectTask?: (id: string) => void }) {
+// Recursive: renders this row, and — while expanded — every one of its
+// own children at depth+1, each carrying its own independent expand state.
+// A sub-subtask (depth 2) has no children of its own to expand (capped by
+// MAX_TASK_DEPTH in list-view.ts), so this naturally bottoms out there.
+function TreeRow({ row, depth, onSelectTask }: { row: TaskRow; depth: number; onSelectTask?: (id: string) => void }) {
   const [open, setOpen] = useState(false);
+  const hasChildren = !!row.children?.length;
   return (
     <>
       <RowLine
         row={row}
-        isSub={false}
-        expanded={open}
-        onToggle={() => setOpen((o) => !o)}
+        depth={depth}
+        expanded={hasChildren ? open : undefined}
+        onToggle={hasChildren ? () => setOpen((o) => !o) : undefined}
         onSelect={() => onSelectTask?.(row.task.id)}
       />
       {open &&
         row.children?.map((child) => (
-          <RowLine key={child.task.id} row={child} isSub onSelect={() => onSelectTask?.(child.task.id)} />
+          <TreeRow key={child.task.id} row={child} depth={depth + 1} onSelectTask={onSelectTask} />
         ))}
     </>
   );
@@ -231,7 +244,7 @@ export function TaskListView({
       </div>
       {rows.length === 0 && <div className="empty-note">No {vocabTask.toLowerCase()}s yet.</div>}
       {rows.map((row) => (
-        <TopRow key={row.task.id} row={row} onSelectTask={onSelectTask} />
+        <TreeRow key={row.task.id} row={row} depth={0} onSelectTask={onSelectTask} />
       ))}
     </div>
   );

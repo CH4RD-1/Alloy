@@ -121,6 +121,33 @@ function restoreTextSelection() {
   document.body.style.userSelect = "";
 }
 
+// Subtask containment (see gantt-schedule.ts's own header comment) — the
+// tightest [minStart, maxDue] every one of taskRow's own descendants
+// (subtasks, and their own subtasks) currently needs, or null when it has
+// none. Used to clamp a parent's own drag/resize live, so the bar visibly
+// refuses to shrink past what its children need rather than only getting
+// silently corrected after the fact on commit (updateTaskSchedule does
+// that same clamp server-side too — this is purely the live-feedback
+// half). Walks TaskRow.children directly rather than the Gantt's own
+// visible/expanded rows, so this is accurate even while a task's subtasks
+// are currently collapsed.
+function descendantBounds(taskRow: TaskRow): { minStart: string; maxDue: string } | null {
+  let minStart: string | null = null;
+  let maxDue: string | null = null;
+  const visit = (r: TaskRow) => {
+    (r.children ?? []).forEach((c) => {
+      if (c.task.start_date && c.task.due_date) {
+        if (minStart === null || c.task.start_date < minStart) minStart = c.task.start_date;
+        if (maxDue === null || c.task.due_date > maxDue) maxDue = c.task.due_date;
+      }
+      visit(c);
+    });
+  };
+  visit(taskRow);
+  if (minStart === null || maxDue === null) return null;
+  return { minStart, maxDue };
+}
+
 function svgPoint(svg: SVGSVGElement, clientX: number, clientY: number) {
   const r = svg.getBoundingClientRect();
   const vb = svg.viewBox.baseVal;
@@ -245,6 +272,14 @@ export function GanttView({
   const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
 
   const ganttRows = useMemo(() => buildGanttRows({ rows, projects, expanded }), [rows, projects, expanded]);
+
+  // Subtask containment clamp bounds, keyed by task id, for every row
+  // currently on the chart — see descendantBounds' own comment above.
+  const descendantBoundsById = useMemo(() => {
+    const m = new Map<string, { minStart: string; maxDue: string } | null>();
+    ganttRows.forEach((r) => m.set(r.row.task.id, descendantBounds(r.row)));
+    return m;
+  }, [ganttRows]);
   const layout = useMemo(() => computeGanttLayout(ganttRows, todayIso, containerWidth), [ganttRows, todayIso, containerWidth]);
   const connectors = useMemo(
     () => (layout ? buildConnectors(ganttRows, layout.geom, links) : []),
@@ -337,7 +372,7 @@ export function GanttView({
   // in lib/actions.ts), mirroring reorderWorkflowStatuses's wholesale
   // approach, rather than trying to swap just two rows' position values —
   // simpler, and self-healing for any rows still sitting on the 0 default.
-  const topLevelIds = useMemo(() => ganttRows.filter((r) => !r.sub).map((r) => r.row.task.id), [ganttRows]);
+  const topLevelIds = useMemo(() => ganttRows.filter((r) => r.depth === 0).map((r) => r.row.task.id), [ganttRows]);
 
   const moveTaskRow = useCallback(
     (taskId: string, direction: "up" | "down") => {
@@ -405,6 +440,15 @@ export function GanttView({
         newDue = addDays(origDueS, deltaDays);
         if (daysBetween(origStartS, newDue) < 1) newDue = addDays(origStartS, 1);
         newStart = origStartS;
+      }
+      // Subtask containment: can't drag/resize this bar smaller than its
+      // own subtasks (and their own subtasks) currently need — clamped
+      // live here for immediate feedback, and again authoritatively by
+      // updateTaskSchedule on commit (see that function's own comment).
+      const bounds = descendantBoundsById.get(taskId);
+      if (bounds) {
+        if (newStart > bounds.minStart) newStart = bounds.minStart;
+        if (newDue < bounds.maxDue) newDue = bounds.maxDue;
       }
       finalStart = newStart;
       finalDue = newDue;
@@ -617,10 +661,10 @@ export function GanttView({
               {ganttRows.map((r) => (
                 <div
                   key={r.row.task.id}
-                  className={`gantt-label-row ${r.sub ? "sub" : ""}`}
+                  className={`gantt-label-row ${r.depth > 0 ? "sub" : ""} ${r.depth > 1 ? "subsub" : ""}`}
                   onClick={() => onSelectTask(r.row.task.id)}
                 >
-                  {!r.sub && r.row.children?.length ? (
+                  {r.row.children?.length ? (
                     <button
                       type="button"
                       className={`expand-btn ${expanded.has(r.row.task.id) ? "open" : ""}`}
@@ -633,7 +677,7 @@ export function GanttView({
                       <ChevronIcon open={expanded.has(r.row.task.id)} />
                     </button>
                   ) : (
-                    !r.sub && <span className="expand-spacer" />
+                    <span className="expand-spacer" />
                   )}
                   {r.row.task.is_milestone && (
                     <span style={{ color: "var(--accent)", flex: "0 0 auto" }} title="Milestone">
@@ -644,7 +688,7 @@ export function GanttView({
                   <span className="row-title" title={r.row.task.title}>
                     {r.row.task.title}
                   </span>
-                  {!r.sub && topLevelIds.length > 1 && (
+                  {r.depth === 0 && topLevelIds.length > 1 && (
                     <span className="gantt-reorder-btns" onClick={(e) => e.stopPropagation()}>
                       <button
                         type="button"

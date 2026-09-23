@@ -3,7 +3,7 @@
 import { createClient, createServiceRoleClient } from "@/lib/supabase/server";
 import crypto from "crypto";
 import { revalidatePath } from "next/cache";
-import { autoArrangeCompute, cascadeSchedule, type ScheduleTask } from "@/lib/gantt-schedule";
+import { autoArrangeCompute, cascadeSchedule, clampToDescendants, applyParentContainment, type ScheduleTask, type Resolved } from "@/lib/gantt-schedule";
 import { TASK_ATTACHMENTS_BUCKET, TASK_ATTACHMENT_MAX_BYTES, taskAttachmentPath, ticketMessageAttachmentPath, sanitizeFilename } from "@/lib/storage";
 import { replyToAddressForTask } from "@/lib/channel-verify";
 import type { FormField, FormFieldType, Role, OrgTemplate, TicketChannel, WorkflowType, DevTools } from "@/lib/types";
@@ -139,11 +139,21 @@ export async function updateTaskStatus(taskId: string, toStatusId: string, actin
   if (!allowed) throw new Error("Your role can't make this move.");
 
   if (transition.require_subtasks_complete) {
-    const { data: children } = await supabase
+    // Recurses one extra level now that a subtask can have its own
+    // sub-subtasks (MAX_TASK_DEPTH in lib/list-view.ts caps it at exactly
+    // that — task/subtask/sub-subtask) — "all subtasks complete" should
+    // mean the whole subtree, not just the direct layer, or a sub-subtask
+    // could sit incomplete forever with nothing ever catching it.
+    const { data: directChildren } = await supabase
       .from("tasks")
       .select("id, status:workflow_statuses ( is_closed )")
       .eq("parent_task_id", taskId);
-    const incomplete = (children ?? []).some((c: any) => !c.status?.is_closed);
+    const directIds = (directChildren ?? []).map((c: any) => c.id as string);
+    const { data: grandchildren } = directIds.length
+      ? await supabase.from("tasks").select("id, status:workflow_statuses ( is_closed )").in("parent_task_id", directIds)
+      : { data: [] as any[] };
+    const allDescendants = [...(directChildren ?? []), ...(grandchildren ?? [])];
+    const incomplete = allDescendants.some((c: any) => !c.status?.is_closed);
     if (incomplete) throw new Error("All subtasks must be complete before this move.");
   }
 
@@ -187,6 +197,61 @@ export async function updateTaskFields(
   }>
 ) {
   const { supabase } = await requireUser();
+
+  // Subtask containment (see gantt-schedule.ts's clampToDescendants/
+  // applyParentContainment) needs to run for a direct date edit too, not
+  // just a Gantt drag — the task panel's own Start/Due inputs and Duration
+  // box both come through here. Deliberately narrower than
+  // updateTaskSchedule though: this only runs the containment math, never
+  // the Block/Concurrent/Clone link cascade — a plain field edit has never
+  // pushed other tasks around via those links (a pre-existing, unrelated
+  // gap), and quietly starting to do that as a side effect of this
+  // wouldn't be a small, disclosable change.
+  if (patch.start_date !== undefined || patch.due_date !== undefined) {
+    const { data: task } = await supabase
+      .from("tasks")
+      .select("id, org_id, parent_task_id, start_date, due_date")
+      .eq("id", taskId)
+      .maybeSingle();
+    const nextStart = patch.start_date !== undefined ? patch.start_date : task?.start_date ?? null;
+    const nextDue = patch.due_date !== undefined ? patch.due_date : task?.due_date ?? null;
+    if (task && nextStart && nextDue) {
+      const { data: orgTasks } = await supabase.from("tasks").select("id, parent_task_id, start_date, due_date").eq("org_id", task.org_id);
+      const baseTasks: ScheduleTask[] = (orgTasks ?? []).map((t) => ({
+        id: t.id,
+        start: t.start_date,
+        due: t.due_date,
+        isMilestone: false, // unread by either containment helper — harmless
+        blockerIds: [],
+        concurrentIds: [],
+        cloneIds: [],
+        parentId: t.parent_task_id,
+      }));
+
+      const clamped = clampToDescendants(baseTasks, taskId, nextStart, nextDue);
+      patch = { ...patch, start_date: clamped.start, due_date: clamped.due };
+
+      const resolved = new Map<string, Resolved>();
+      baseTasks.forEach((t) => {
+        if (t.start && t.due) resolved.set(t.id, { start: t.start, due: t.due });
+      });
+      resolved.set(taskId, clamped);
+      applyParentContainment(baseTasks, resolved, [taskId]);
+
+      const ancestorChanges: { id: string; start: string; due: string }[] = [];
+      baseTasks.forEach((t) => {
+        if (t.id === taskId) return;
+        const r = resolved.get(t.id);
+        if (r && (r.start !== t.start || r.due !== t.due)) ancestorChanges.push({ id: t.id, start: r.start, due: r.due });
+      });
+      if (ancestorChanges.length) {
+        await Promise.all(
+          ancestorChanges.map((c) => supabase.from("tasks").update({ start_date: c.start, due_date: c.due }).eq("id", c.id))
+        );
+      }
+    }
+  }
+
   const { error } = await supabase.from("tasks").update(patch).eq("id", taskId);
   if (error) throw new Error(error.message);
   revalidatePath("/dashboard");
@@ -283,6 +348,44 @@ export async function createTask(input: {
 
   if (error) throw new Error(error.message);
   await logActivity(supabase, { orgId: input.orgId, taskId: created.id as string, type: "created", actorUserId });
+
+  // New subtask containment: a brand-new subtask created with its own
+  // dates already outside its parent's current range grows the parent
+  // (and, if that parent is itself a subtask, its own parent too) exactly
+  // like a later drag/edit would — see gantt-schedule.ts's
+  // applyParentContainment. No clamping needed on this side — a
+  // just-created task has no descendants of its own yet to clamp against.
+  const newStart = input.startDate;
+  const newDue = input.isMilestone ? input.startDate : input.dueDate;
+  if (input.parentTaskId && newStart && newDue) {
+    const { data: orgTasks } = await supabase.from("tasks").select("id, parent_task_id, start_date, due_date").eq("org_id", input.orgId);
+    const baseTasks: ScheduleTask[] = (orgTasks ?? []).map((t) => ({
+      id: t.id,
+      start: t.start_date,
+      due: t.due_date,
+      isMilestone: false, // unread by applyParentContainment — harmless
+      blockerIds: [],
+      concurrentIds: [],
+      cloneIds: [],
+      parentId: t.parent_task_id,
+    }));
+    const resolved = new Map<string, Resolved>();
+    baseTasks.forEach((t) => {
+      if (t.start && t.due) resolved.set(t.id, { start: t.start, due: t.due });
+    });
+    applyParentContainment(baseTasks, resolved, [created.id as string]);
+
+    const ancestorChanges: { id: string; start: string; due: string }[] = [];
+    baseTasks.forEach((t) => {
+      if (t.id === created.id) return;
+      const r = resolved.get(t.id);
+      if (r && (r.start !== t.start || r.due !== t.due)) ancestorChanges.push({ id: t.id, start: r.start, due: r.due });
+    });
+    if (ancestorChanges.length) {
+      await Promise.all(ancestorChanges.map((c) => supabase.from("tasks").update({ start_date: c.start, due_date: c.due }).eq("id", c.id)));
+    }
+  }
+
   revalidatePath("/dashboard");
   return created.id as string;
 }
@@ -359,7 +462,7 @@ export async function autoArrangeSchedule(orgId: string): Promise<number> {
   const { supabase } = await requireUser();
 
   const [{ data: tasks }, { data: links }, { data: projects }] = await Promise.all([
-    supabase.from("tasks").select("id, project_id, start_date, due_date, is_milestone").eq("org_id", orgId),
+    supabase.from("tasks").select("id, project_id, parent_task_id, start_date, due_date, is_milestone").eq("org_id", orgId),
     supabase.from("task_links").select("from_task_id, to_task_id, link_type").eq("org_id", orgId),
     supabase.from("projects").select("id, is_helpdesk").eq("org_id", orgId),
   ]);
@@ -377,18 +480,37 @@ export async function autoArrangeSchedule(orgId: string): Promise<number> {
       blockerIds: allLinks.filter((l) => l.from_task_id === t.id && l.link_type === "blocked").map((l) => l.to_task_id),
       concurrentIds: allLinks.filter((l) => l.from_task_id === t.id && l.link_type === "concurrent").map((l) => l.to_task_id),
       cloneIds: allLinks.filter((l) => l.from_task_id === t.id && l.link_type === "clone").map((l) => l.to_task_id),
+      parentId: t.parent_task_id,
     }));
 
   const changes = autoArrangeCompute(scheduleTasks);
-  if (changes.size > 0) {
+
+  // Subtask containment (see gantt-schedule.ts's own header comment on
+  // applyParentContainment) applies here too, not just to a live drag —
+  // Auto-arrange can just as easily leave a subtask sitting outside its
+  // parent's range as a manual drag can.
+  const resolved = new Map<string, Resolved>();
+  scheduleTasks.forEach((t) => {
+    if (t.start && t.due) resolved.set(t.id, { start: t.start, due: t.due });
+  });
+  changes.forEach((v, k) => resolved.set(k, v));
+  applyParentContainment(scheduleTasks, resolved, Array.from(changes.keys()));
+
+  const finalChanges = new Map<string, Resolved>();
+  scheduleTasks.forEach((t) => {
+    const r = resolved.get(t.id);
+    if (r && (r.start !== t.start || r.due !== t.due)) finalChanges.set(t.id, r);
+  });
+
+  if (finalChanges.size > 0) {
     await Promise.all(
-      Array.from(changes.entries()).map(([id, { start, due }]) =>
+      Array.from(finalChanges.entries()).map(([id, { start, due }]) =>
         supabase.from("tasks").update({ start_date: start, due_date: due }).eq("id", id)
       )
     );
     revalidatePath("/dashboard");
   }
-  return changes.size;
+  return finalChanges.size;
 }
 
 // The Gantt view's live drag-to-move / drag-to-resize commit — ported from
@@ -400,11 +522,19 @@ export async function autoArrangeSchedule(orgId: string): Promise<number> {
 // cascade itself reports no further changes, then writes back every task
 // the cascade *did* move (a dependent pushed later, a concurrent/clone
 // partner re-synced). Returns how many tasks moved in total.
+//
+// Also where subtask containment is authoritatively enforced (see
+// gantt-schedule.ts's own header comment on clampToDescendants/
+// applyParentContainment) — the Gantt view clamps live during the drag
+// itself for immediate visual feedback (see handleBarMouseDown in
+// gantt-view.tsx), but this is what actually decides and persists it, the
+// same "never trust the client alone" principle every other server-side
+// gate in this file already follows.
 export async function updateTaskSchedule(orgId: string, taskId: string, start: string, due: string): Promise<number> {
   const { supabase } = await requireUser();
 
   const [{ data: tasks }, { data: links }, { data: projects }] = await Promise.all([
-    supabase.from("tasks").select("id, project_id, start_date, due_date, is_milestone").eq("org_id", orgId),
+    supabase.from("tasks").select("id, project_id, parent_task_id, start_date, due_date, is_milestone").eq("org_id", orgId),
     supabase.from("task_links").select("from_task_id, to_task_id, link_type").eq("org_id", orgId),
     supabase.from("projects").select("id, is_helpdesk").eq("org_id", orgId),
   ]);
@@ -412,30 +542,54 @@ export async function updateTaskSchedule(orgId: string, taskId: string, start: s
   const helpdeskProjectIds = new Set((projects ?? []).filter((p) => p.is_helpdesk).map((p) => p.id));
   const allLinks = links ?? [];
 
-  const scheduleTasks: ScheduleTask[] = (tasks ?? [])
+  const baseTasks: ScheduleTask[] = (tasks ?? [])
     .filter((t) => !helpdeskProjectIds.has(t.project_id))
     .map((t) => ({
       id: t.id,
-      start: t.id === taskId ? start : t.start_date,
-      due: t.id === taskId ? due : t.due_date,
+      start: t.start_date,
+      due: t.due_date,
       isMilestone: t.is_milestone,
       blockerIds: allLinks.filter((l) => l.from_task_id === t.id && l.link_type === "blocked").map((l) => l.to_task_id),
       concurrentIds: allLinks.filter((l) => l.from_task_id === t.id && l.link_type === "concurrent").map((l) => l.to_task_id),
       cloneIds: allLinks.filter((l) => l.from_task_id === t.id && l.link_type === "clone").map((l) => l.to_task_id),
+      parentId: t.parent_task_id,
     }));
 
-  if (!scheduleTasks.some((t) => t.id === taskId)) return 0;
+  if (!baseTasks.some((t) => t.id === taskId)) return 0;
 
-  const changes = cascadeSchedule(scheduleTasks, [taskId]);
-  changes.set(taskId, { start, due }); // always write the drag itself, even if it settled back to its stored value
+  // Containment part 1: can't shrink a parent past what its own subtasks
+  // (and their own subtasks) currently need.
+  const clamped = clampToDescendants(baseTasks, taskId, start, due);
+  const scheduleTasks: ScheduleTask[] = baseTasks.map((t) => (t.id === taskId ? { ...t, start: clamped.start, due: clamped.due } : t));
+
+  const cascadeChanges = cascadeSchedule(scheduleTasks, [taskId]);
+  cascadeChanges.set(taskId, clamped); // always write the (possibly-clamped) drag itself, even if it settled back to its stored value
+
+  // Containment part 2: grow every ancestor whose range no longer contains
+  // this task's new one — the "dragging a subtask past its parent's edge
+  // grows the parent" behavior, bubbling up through a sub-subtask's own
+  // subtask parent to the top-level task too if it needs to.
+  const resolved = new Map<string, Resolved>();
+  scheduleTasks.forEach((t) => {
+    if (t.start && t.due) resolved.set(t.id, { start: t.start, due: t.due });
+  });
+  cascadeChanges.forEach((v, k) => resolved.set(k, v));
+  applyParentContainment(scheduleTasks, resolved, Array.from(cascadeChanges.keys()));
+
+  const finalChanges = new Map<string, Resolved>();
+  scheduleTasks.forEach((t) => {
+    const r = resolved.get(t.id);
+    if (r && (r.start !== t.start || r.due !== t.due)) finalChanges.set(t.id, r);
+  });
+  finalChanges.set(taskId, clamped);
 
   await Promise.all(
-    Array.from(changes.entries()).map(([id, { start: s, due: d }]) =>
+    Array.from(finalChanges.entries()).map(([id, { start: s, due: d }]) =>
       supabase.from("tasks").update({ start_date: s, due_date: d }).eq("id", id)
     )
   );
   revalidatePath("/dashboard");
-  return changes.size;
+  return finalChanges.size;
 }
 
 // Rewrites a set of top-level tasks' Gantt-only position 0..n-1 in one

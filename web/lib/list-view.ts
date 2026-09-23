@@ -56,8 +56,26 @@ export interface TaskRow {
   isBlockedOpen: boolean;
   docCount: number;
   assetName: string | null;
-  children?: TaskRow[]; // only populated on top-level rows
+  // Recursive now (subtasks can have their own subtasks — "sub-subtasks"),
+  // capped at MAX_TASK_DEPTH levels below top-level — see buildRows'
+  // header comment for why the cap exists and where it's enforced.
+  // Populated on every row, not just top-level ones, so opening a
+  // subtask's own panel (or expanding it in List/Gantt) shows *its* own
+  // children too. depth is 0 for a top-level task, 1 for a subtask, 2 for
+  // a sub-subtask (the deepest level this app allows).
+  children?: TaskRow[];
+  depth: number;
 }
+
+// Two layers of subtasks, as requested — task → subtask → sub-subtask —
+// and no deeper. `parent_task_id` itself has no depth limit at the schema
+// level (see schema.sql's own comment), so this cap is enforced purely in
+// app code: rowFor below simply stops recursing once it would produce a
+// depth-3 row, and the subtask-creation UI (task-panel.tsx) hides its own
+// "Add subtask" control once a task is already at MAX_TASK_DEPTH — nothing
+// stops a 4th level existing in the database (e.g. from data written
+// outside this app), it just never renders past this depth anywhere.
+export const MAX_TASK_DEPTH = 2;
 
 export function buildRows(params: {
   tasks: Task[];
@@ -100,12 +118,12 @@ export function buildRows(params: {
   // recorded on this task's own side; no second half to add on top of it.
   const depCountFor = (t: Task) => links.filter((l) => l.from_task_id === t.id).length;
 
-  const rowFor = (t: Task): TaskRow => {
+  const rowFor = (t: Task, depth: number): TaskRow => {
     const kids = childrenOf(t.id);
     const team = t.team_id ? teamById.get(t.team_id) : null;
     const status = statusById.get(t.status_id);
     const asset = t.asset_id ? assetById.get(t.asset_id) : null;
-    return {
+    const row: TaskRow = {
       task: t,
       childCount: kids.length,
       doneChildCount: kids.filter((k) => statusById.get(k.status_id)?.is_closed).length,
@@ -121,19 +139,23 @@ export function buildRows(params: {
       isBlockedOpen: isBlockedOpen(t),
       docCount: docCountByTask.get(t.id) ?? 0,
       assetName: asset?.name ?? null,
+      depth,
     };
+    // Stop recursing once one more level would exceed MAX_TASK_DEPTH — a
+    // sub-subtask's own row still reports an accurate childCount above (so
+    // a stray deeper task, e.g. from data written outside this app, still
+    // counts correctly), it just never gets its own rendered `children`.
+    row.children = depth < MAX_TASK_DEPTH ? kids.map((k) => rowFor(k, depth + 1)) : [];
+    return row;
   };
 
-  return topLevel.map((t) => {
-    const row = rowFor(t);
-    row.children = childrenOf(t.id).map((k) => rowFor(k));
-    return row;
-  });
+  return topLevel.map((t) => rowFor(t, 0));
 }
 
-// Every row, top-level and sub, as one flat list — used wherever a UI needs
-// to look a task up by id (the panel, the link picker) without caring about
-// the parent/child grouping buildRows() produces.
+// Every row, at any depth, as one flat list — used wherever a UI needs to
+// look a task up by id (the panel, the link picker) without caring about
+// the parent/child grouping buildRows() produces. Recurses through every
+// level buildRows() populated (see MAX_TASK_DEPTH), not just one.
 export function flattenRows(rows: TaskRow[]): TaskRow[] {
-  return rows.flatMap((r) => [r, ...(r.children ?? [])]);
+  return rows.flatMap((r) => [r, ...flattenRows(r.children ?? [])]);
 }
