@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import type { FormTemplate, FormFieldType } from "@/lib/types";
+import type { FormTemplate, FormFieldType, CustomFieldDef } from "@/lib/types";
 import {
   createFormTemplate,
   updateFormTemplate,
@@ -29,12 +29,14 @@ export function FormTemplatesPanel({
   templates,
   usage,
   vocabTask,
+  customFieldDefs,
   onClose,
 }: {
   orgId: string;
   templates: FormTemplate[];
   usage: Map<string, number>;
   vocabTask: string;
+  customFieldDefs: CustomFieldDef[];
   onClose: () => void;
 }) {
   const router = useRouter();
@@ -83,7 +85,14 @@ export function FormTemplatesPanel({
             <span className="field-label">Existing templates</span>
             {templates.length === 0 && <p style={{ color: "var(--text-faint)", fontSize: 12 }}>No form templates yet.</p>}
             {templates.map((t) => (
-              <TemplateCard key={t.id} template={t} usedCount={usage.get(t.id) ?? 0} pending={pending} run={run} />
+              <TemplateCard
+                key={t.id}
+                template={t}
+                usedCount={usage.get(t.id) ?? 0}
+                pending={pending}
+                run={run}
+                customFieldDefs={customFieldDefs}
+              />
             ))}
           </div>
 
@@ -115,15 +124,36 @@ function TemplateCard({
   usedCount,
   pending,
   run,
+  customFieldDefs,
 }: {
   template: FormTemplate;
   usedCount: number;
   pending: boolean;
   run: (action: () => Promise<unknown>) => void;
+  customFieldDefs: CustomFieldDef[];
 }) {
   const [fieldLabel, setFieldLabel] = useState("");
   const [fieldType, setFieldType] = useState<FormFieldType>("text");
   const [fieldOptions, setFieldOptions] = useState("");
+  const [customFieldId, setCustomFieldId] = useState("");
+
+  // Existing task custom fields (Manage custom fields) not already added to
+  // this template — a quick way to reuse a field definition that already
+  // exists org-wide instead of retyping its label/type/options by hand.
+  // This only copies the definition's shape into a new, independent form
+  // field (same as typing it in below) — it doesn't link back to the
+  // custom field or its values, since a Portal submission's answers
+  // (task_object_forms.values) and a task's own custom_field_values have
+  // always been separate systems.
+  const usedLabels = new Set(template.fields.map((f) => f.label.trim().toLowerCase()));
+  const availableCustomFields = customFieldDefs.filter((d) => !usedLabels.has(d.name.trim().toLowerCase()));
+
+  function addCustomField() {
+    const def = customFieldDefs.find((d) => d.id === customFieldId);
+    if (!def) return;
+    setCustomFieldId("");
+    run(() => addFormField(template.id, { label: def.name, type: def.field_type, options: def.options ?? undefined }));
+  }
 
   function addField() {
     const label = fieldLabel.trim();
@@ -232,6 +262,25 @@ function TemplateCard({
       )}
       <button className="small-btn" style={{ marginLeft: 14, marginTop: fieldType === "select" ? 0 : 8 }} disabled={!fieldLabel.trim() || pending} onClick={addField}>
         Add field
+      </button>
+
+      <div className="add-inline" style={{ marginTop: 10, marginLeft: 14 }}>
+        <select
+          className="select-input"
+          value={customFieldId}
+          onChange={(e) => setCustomFieldId(e.target.value)}
+          disabled={availableCustomFields.length === 0}
+        >
+          <option value="">{availableCustomFields.length === 0 ? "No custom fields to add" : "Custom Fields"}</option>
+          {availableCustomFields.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name} ({FIELD_TYPE_LABEL[d.field_type]})
+            </option>
+          ))}
+        </select>
+      </div>
+      <button className="small-btn" style={{ marginLeft: 14, marginTop: 8 }} disabled={!customFieldId || pending} onClick={addCustomField}>
+        Add Custom field
       </button>
     </div>
   );

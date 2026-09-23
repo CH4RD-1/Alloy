@@ -610,6 +610,27 @@ create unique index ticket_messages_external_ref_uq
   on ticket_messages (channel, external_message_ref) where external_message_ref is not null;
   -- guards against a webhook redelivering the same inbound message twice
 
+-- Files attached directly to a conversation message (staff reply, private
+-- note, or a customer's own portal reply) — shown inline in the message
+-- bubble itself rather than as a separate task attachment, so a customer
+-- reading the Portal thread sees them right where they were shared. One
+-- message can carry several files (unlike task_object_files, which is
+-- capped at one file per task_object), hence its own table rather than
+-- reusing that one. Storage-wise these live in the same task-attachments
+-- bucket as everything else (see lib/storage.ts's ticketMessageAttachmentPath
+-- and task_attachments_storage.sql's RLS policies, which only ever inspect
+-- the org_id path segment, so no bucket/policy changes were needed).
+create table ticket_message_attachments (
+  id                 uuid primary key default gen_random_uuid(),
+  ticket_message_id  uuid not null references ticket_messages(id) on delete cascade,
+  storage_path       text not null,
+  filename           text not null,
+  mime_type          text,
+  size_bytes         bigint
+);
+
+create index on ticket_message_attachments (ticket_message_id);
+
 
 -- ----------------------------------------------------------------------------
 -- Activity log (audit trail)
@@ -893,6 +914,15 @@ create policy ticket_messages_tenant_isolation on ticket_messages
 -- need their own write path (most likely a service-role server action
 -- rather than a client-side insert policy, so an unauthenticated webhook
 -- can still write without becoming a standing RLS carve-out).
+
+alter table ticket_message_attachments enable row level security;
+create policy ticket_message_attachments_tenant_isolation on ticket_message_attachments
+  using (exists (select 1 from ticket_messages tm where tm.id = ticket_message_attachments.ticket_message_id and is_org_member(tm.org_id)))
+  with check (exists (select 1 from ticket_messages tm where tm.id = ticket_message_attachments.ticket_message_id and is_org_member(tm.org_id)));
+-- Same caveat as ticket_messages above: a Portal visitor attaching a file to
+-- their own reply isn't an org member, so that write path is service-role
+-- (see attachPortalTicketMessageFile in lib/actions.ts), same as
+-- addPortalTicketReply's own message insert.
 
 alter table activity_log enable row level security;
 create policy activity_log_tenant_isolation on activity_log

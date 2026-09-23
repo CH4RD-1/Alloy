@@ -4,7 +4,7 @@ import { createClient, createServiceRoleClient } from "@/lib/supabase/server";
 import crypto from "crypto";
 import { revalidatePath } from "next/cache";
 import { autoArrangeCompute, cascadeSchedule, type ScheduleTask } from "@/lib/gantt-schedule";
-import { TASK_ATTACHMENTS_BUCKET, TASK_ATTACHMENT_MAX_BYTES, taskAttachmentPath, sanitizeFilename } from "@/lib/storage";
+import { TASK_ATTACHMENTS_BUCKET, TASK_ATTACHMENT_MAX_BYTES, taskAttachmentPath, ticketMessageAttachmentPath, sanitizeFilename } from "@/lib/storage";
 import { replyToAddressForTask } from "@/lib/channel-verify";
 import type { FormField, FormFieldType, Role, OrgTemplate, TicketChannel, WorkflowType } from "@/lib/types";
 
@@ -161,6 +161,7 @@ export async function updateTaskFields(
   taskId: string,
   patch: Partial<{
     title: string;
+    description: string | null;
     assignee_id: string | null;
     team_id: string | null;
     is_milestone: boolean;
@@ -209,6 +210,7 @@ export async function createTask(input: {
   teamId: string | null;
   parentTaskId?: string | null;
   title: string;
+  description?: string | null;
   assigneeId: string | null;
   isMilestone: boolean;
   startDate: string | null;
@@ -238,6 +240,7 @@ export async function createTask(input: {
       team_id: input.teamId,
       parent_task_id: input.parentTaskId ?? null,
       title: input.title,
+      description: input.description || null,
       status_id: firstStatus.id,
       assignee_id: input.assigneeId,
       is_milestone: input.isMilestone,
@@ -874,6 +877,7 @@ export async function submitPortalRequest(input: {
   requesterName: string;
   requesterEmail: string;
   title: string;
+  description?: string;
   values: Record<string, string>;
 }): Promise<{ taskId: string; portalAccessToken: string }> {
   const supabase = createServiceRoleClient();
@@ -908,7 +912,12 @@ export async function submitPortalRequest(input: {
       project_id: project.id,
       team_id: teamId,
       title,
-      description: `Submitted via the Portal by ${name} using the "${template.name}" template.`,
+      // A requester-typed description (a new, always-shown field on the
+      // Portal form itself — see components/portal-request-form.tsx — not
+      // one of the template's own custom fields) takes priority; the old
+      // generic boilerplate is now only a fallback for a blank submission
+      // or one made before this field existed.
+      description: input.description?.trim() || `Submitted via the Portal by ${name} using the "${template.name}" template.`,
       status_id: firstStatusId,
       channel: "portal",
       contact_id: contactId,
@@ -993,7 +1002,13 @@ export async function getPortalTicketByToken(token: string): Promise<{
   slaResolutionDays: number | null;
   status: { label: string; color: string; key: string; isClosed: boolean };
   resolvedAt: string | null;
-  messages: { id: string; direction: "inbound" | "outbound"; body: string; createdAt: string }[];
+  messages: {
+    id: string;
+    direction: "inbound" | "outbound";
+    body: string;
+    createdAt: string;
+    attachments: { id: string; filename: string; mimeType: string | null; sizeBytes: number | null; url: string | null }[];
+  }[];
 } | null> {
   const supabase = createServiceRoleClient();
 
@@ -1016,6 +1031,43 @@ export async function getPortalTicketByToken(token: string): Promise<{
     .eq("task_id", task.id)
     .eq("visibility", "public")
     .order("created_at", { ascending: true });
+
+  // Attachments for those messages — same signed-URL pattern as
+  // getWorkspaceData's ticketMessageAttachmentsByMessageId (lib/tasks-data.ts),
+  // just re-fetched here since the Portal page is a fully separate,
+  // service-role-only read path with no shared request context to reuse.
+  const messageIds = (messages ?? []).map((m) => m.id as string);
+  const attachmentsByMessageId = new Map<
+    string,
+    { id: string; filename: string; mimeType: string | null; sizeBytes: number | null; url: string | null }[]
+  >();
+  if (messageIds.length) {
+    const { data: attachmentRows } = await supabase
+      .from("ticket_message_attachments")
+      .select("id, ticket_message_id, storage_path, filename, mime_type, size_bytes")
+      .in("ticket_message_id", messageIds);
+    const rows = attachmentRows ?? [];
+    const signedByPath = new Map<string, string>();
+    if (rows.length) {
+      const { data: signedRows } = await supabase.storage
+        .from(TASK_ATTACHMENTS_BUCKET)
+        .createSignedUrls(rows.map((r) => r.storage_path as string), 3600);
+      (signedRows ?? []).forEach((s) => {
+        if (s.signedUrl && s.path) signedByPath.set(s.path, s.signedUrl);
+      });
+    }
+    rows.forEach((row) => {
+      const list = attachmentsByMessageId.get(row.ticket_message_id as string) ?? [];
+      list.push({
+        id: row.id as string,
+        filename: row.filename as string,
+        mimeType: (row.mime_type as string | null) ?? null,
+        sizeBytes: (row.size_bytes as number | null) ?? null,
+        url: signedByPath.get(row.storage_path as string) ?? null,
+      });
+      attachmentsByMessageId.set(row.ticket_message_id as string, list);
+    });
+  }
 
   const org = (task as any).orgs;
   const project = (task as any).projects;
@@ -1070,11 +1122,12 @@ export async function getPortalTicketByToken(token: string): Promise<{
       direction: m.direction as "inbound" | "outbound",
       body: m.body as string,
       createdAt: m.created_at as string,
+      attachments: attachmentsByMessageId.get(m.id as string) ?? [],
     })),
   };
 }
 
-export async function addPortalTicketReply(token: string, body: string): Promise<void> {
+export async function addPortalTicketReply(token: string, body: string): Promise<string> {
   const supabase = createServiceRoleClient();
 
   const { data: task } = await supabase
@@ -1084,16 +1137,101 @@ export async function addPortalTicketReply(token: string, body: string): Promise
     .maybeSingle();
   if (!task) throw new Error("This link isn't valid.");
 
-  const { error } = await supabase.from("ticket_messages").insert({
-    org_id: task.org_id,
-    task_id: task.id,
-    direction: "inbound",
-    channel: task.channel,
-    author_contact_id: task.contact_id,
-    body,
-    visibility: "public",
+  const { data: inserted, error } = await supabase
+    .from("ticket_messages")
+    .insert({
+      org_id: task.org_id,
+      task_id: task.id,
+      direction: "inbound",
+      channel: task.channel,
+      author_contact_id: task.contact_id,
+      body,
+      visibility: "public",
+    })
+    .select("id")
+    .single();
+  if (error || !inserted) throw new Error(error?.message ?? "Could not send that reply.");
+  revalidatePath(`/portal/ticket/${token}`);
+  return inserted.id as string;
+}
+
+// Attaches a file to an existing conversation message — the staff-side
+// counterpart to attachPortalTicketMessageFile below. Called right after
+// sendChannelReply/addInternalNote/simulateCustomerMessage return the new
+// message's id (see ConversationSection in components/task-panel.tsx),
+// mirroring createFileTaskObject's own "create the row, then upload keyed
+// by its id" order — a message has to exist before a file can be keyed to
+// it. Verifies the message actually belongs to this task/org (via the
+// caller's own RLS-bound select) before writing, since taskId/messageId
+// both arrive from the client.
+export async function attachTicketMessageFile(taskId: string, messageId: string, formData: FormData): Promise<void> {
+  const { supabase } = await requireUser();
+  const file = formData.get("file");
+  if (!(file instanceof File)) throw new Error("No file provided.");
+  if (file.size > TASK_ATTACHMENT_MAX_BYTES) throw new Error("That file is over 4MB — please choose something smaller.");
+
+  const { data: task } = await supabase.from("tasks").select("id, org_id").eq("id", taskId).maybeSingle();
+  if (!task) throw new Error("Task not found.");
+  const { data: message } = await supabase.from("ticket_messages").select("id").eq("id", messageId).eq("task_id", taskId).maybeSingle();
+  if (!message) throw new Error("Message not found.");
+
+  const filename = sanitizeFilename(file.name || "file");
+  const path = ticketMessageAttachmentPath(task.org_id, taskId, messageId, filename);
+
+  const { error: uploadError } = await supabase.storage
+    .from(TASK_ATTACHMENTS_BUCKET)
+    .upload(path, file, { contentType: file.type || undefined });
+  if (uploadError) throw new Error(uploadError.message);
+
+  const { error: rowError } = await supabase.from("ticket_message_attachments").insert({
+    ticket_message_id: messageId,
+    storage_path: path,
+    filename: file.name || filename,
+    mime_type: file.type || null,
+    size_bytes: file.size,
   });
-  if (error) throw new Error(error.message);
+  if (rowError) {
+    await supabase.storage.from(TASK_ATTACHMENTS_BUCKET).remove([path]);
+    throw new Error(rowError.message);
+  }
+  revalidatePath("/dashboard");
+}
+
+// Portal-side counterpart — a customer attaching a file to their own reply
+// from the "come back later" ticket page has no signed-in session (same
+// trust model as addPortalTicketReply's own message insert), so this goes
+// through the service-role client and re-validates the token itself rather
+// than relying on RLS.
+export async function attachPortalTicketMessageFile(token: string, messageId: string, formData: FormData): Promise<void> {
+  const supabase = createServiceRoleClient();
+  const file = formData.get("file");
+  if (!(file instanceof File)) throw new Error("No file provided.");
+  if (file.size > TASK_ATTACHMENT_MAX_BYTES) throw new Error("That file is over 4MB — please choose something smaller.");
+
+  const { data: task } = await supabase.from("tasks").select("id, org_id").eq("portal_access_token", token).maybeSingle();
+  if (!task) throw new Error("This link isn't valid.");
+  const { data: message } = await supabase.from("ticket_messages").select("id").eq("id", messageId).eq("task_id", task.id).maybeSingle();
+  if (!message) throw new Error("Message not found.");
+
+  const filename = sanitizeFilename(file.name || "file");
+  const path = ticketMessageAttachmentPath(task.org_id, task.id, messageId, filename);
+
+  const { error: uploadError } = await supabase.storage
+    .from(TASK_ATTACHMENTS_BUCKET)
+    .upload(path, file, { contentType: file.type || undefined });
+  if (uploadError) throw new Error(uploadError.message);
+
+  const { error: rowError } = await supabase.from("ticket_message_attachments").insert({
+    ticket_message_id: messageId,
+    storage_path: path,
+    filename: file.name || filename,
+    mime_type: file.type || null,
+    size_bytes: file.size,
+  });
+  if (rowError) {
+    await supabase.storage.from(TASK_ATTACHMENTS_BUCKET).remove([path]);
+    throw new Error(rowError.message);
+  }
   revalidatePath(`/portal/ticket/${token}`);
 }
 
@@ -1215,7 +1353,7 @@ export async function intakeTicket(input: {
 // service-role client — a real org member sending a reply is exactly what
 // ticket_messages' own tenant-isolation RLS policy already allows, so there
 // is no need for a carve-out here the way the inbound webhook path needs one.
-export async function sendChannelReply(taskId: string, body: string): Promise<void> {
+export async function sendChannelReply(taskId: string, body: string): Promise<string> {
   const { supabase, user } = await requireUser();
 
   const { data: task, error: taskError } = await supabase
@@ -1300,46 +1438,56 @@ export async function sendChannelReply(taskId: string, body: string): Promise<vo
   // out). That's the whole generalization: everything past this point was
   // already channel-agnostic.
 
-  const { error: insertError } = await supabase.from("ticket_messages").insert({
-    org_id: task.org_id,
-    task_id: taskId,
-    direction: "outbound",
-    channel: task.channel,
-    author_user_id: user.id,
-    body,
-    external_message_ref: externalMessageRef,
-    visibility: "public",
-  });
-  if (insertError) throw new Error(insertError.message);
+  const { data: inserted, error: insertError } = await supabase
+    .from("ticket_messages")
+    .insert({
+      org_id: task.org_id,
+      task_id: taskId,
+      direction: "outbound",
+      channel: task.channel,
+      author_user_id: user.id,
+      body,
+      external_message_ref: externalMessageRef,
+      visibility: "public",
+    })
+    .select("id")
+    .single();
+  if (insertError || !inserted) throw new Error(insertError?.message ?? "Could not send that.");
 
   if (externalMessageRef) {
     await supabase.from("tasks").update({ external_thread_ref: externalMessageRef }).eq("id", taskId);
   }
 
   revalidatePath("/dashboard");
+  return inserted.id as string;
 }
 
 // Internal-only note — always local, whatever the task's channel, and never
 // delivered anywhere. Matches the prototype's "Add private note" button
 // exactly (v0.15 log entry): agent messages markable public/private, private
 // ones flagged visually and stripped out by "Preview as customer."
-export async function addInternalNote(taskId: string, body: string): Promise<void> {
+export async function addInternalNote(taskId: string, body: string): Promise<string> {
   const { supabase, user } = await requireUser();
 
   const { data: task, error: taskError } = await supabase.from("tasks").select("id, org_id, channel").eq("id", taskId).single();
   if (taskError || !task) throw new Error("Task not found.");
 
-  const { error } = await supabase.from("ticket_messages").insert({
-    org_id: task.org_id,
-    task_id: taskId,
-    direction: "outbound",
-    channel: task.channel,
-    author_user_id: user.id,
-    body,
-    visibility: "private",
-  });
-  if (error) throw new Error(error.message);
+  const { data: inserted, error } = await supabase
+    .from("ticket_messages")
+    .insert({
+      org_id: task.org_id,
+      task_id: taskId,
+      direction: "outbound",
+      channel: task.channel,
+      author_user_id: user.id,
+      body,
+      visibility: "private",
+    })
+    .select("id")
+    .single();
+  if (error || !inserted) throw new Error(error?.message ?? "Could not save that note.");
   revalidatePath("/dashboard");
+  return inserted.id as string;
 }
 
 // "+ Simulate customer message" — a testing/demo convenience the prototype
@@ -1348,7 +1496,7 @@ export async function addInternalNote(taskId: string, body: string): Promise<voi
 // Inserts a fabricated inbound row attributed to the task's own contact when
 // it has one; an internal-channel task has no contact, so it's left null and
 // the panel's own contactLabel fallback ("the contact") covers the display.
-export async function simulateCustomerMessage(taskId: string, body: string): Promise<void> {
+export async function simulateCustomerMessage(taskId: string, body: string): Promise<string> {
   const { supabase } = await requireUser();
 
   const { data: task, error: taskError } = await supabase
@@ -1358,17 +1506,22 @@ export async function simulateCustomerMessage(taskId: string, body: string): Pro
     .single();
   if (taskError || !task) throw new Error("Task not found.");
 
-  const { error } = await supabase.from("ticket_messages").insert({
-    org_id: task.org_id,
-    task_id: taskId,
-    direction: "inbound",
-    channel: task.channel,
-    author_contact_id: task.contact_id,
-    body,
-    visibility: "public",
-  });
-  if (error) throw new Error(error.message);
+  const { data: inserted, error } = await supabase
+    .from("ticket_messages")
+    .insert({
+      org_id: task.org_id,
+      task_id: taskId,
+      direction: "inbound",
+      channel: task.channel,
+      author_contact_id: task.contact_id,
+      body,
+      visibility: "public",
+    })
+    .select("id")
+    .single();
+  if (error || !inserted) throw new Error(error?.message ?? "Could not simulate that message.");
   revalidatePath("/dashboard");
+  return inserted.id as string;
 }
 
 /* ============================================================================

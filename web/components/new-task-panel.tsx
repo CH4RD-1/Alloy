@@ -31,6 +31,7 @@ export function NewTaskPanel({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
   const [projectId, setProjectId] = useState(defaultProjectId);
   const [teamId, setTeamId] = useState("");
   const [assigneeId, setAssigneeId] = useState("");
@@ -58,6 +59,7 @@ export function NewTaskPanel({
           projectId,
           teamId: teamId || null,
           title: title.trim(),
+          description: description.trim() || null,
           assigneeId: assigneeId || null,
           isMilestone,
           startDate: startDate || null,
@@ -92,6 +94,16 @@ export function NewTaskPanel({
               onChange={(e) => setTitle(e.target.value)}
               autoFocus
               onKeyDown={(e) => e.key === "Enter" && submit()}
+            />
+          </div>
+
+          <div className="field-group">
+            <span className="field-label">Description</span>
+            <textarea
+              className="text-input obj-textarea"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="More detailed description of the issue…."
             />
           </div>
 

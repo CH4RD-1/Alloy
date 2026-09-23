@@ -21,6 +21,7 @@ import type {
   CustomFieldDef,
   ActivityLogEntry,
   TicketMessage,
+  TicketMessageAttachment,
   Contact,
   Invite,
   SubscriptionStatus,
@@ -139,6 +140,7 @@ export function TasksWorkspace({
   contactNameById,
   contactById,
   ticketMessages,
+  ticketMessageAttachmentsByMessageId,
   invites,
   orgName,
   orgSlug,
@@ -179,6 +181,7 @@ export function TasksWorkspace({
   contactNameById: Map<string, string>;
   contactById: Map<string, Contact>;
   ticketMessages: TicketMessage[];
+  ticketMessageAttachmentsByMessageId: Map<string, (TicketMessageAttachment & { url: string | null })[]>;
   invites: Invite[];
   orgName: string;
   orgSlug: string;
@@ -443,6 +446,7 @@ export function TasksWorkspace({
           contactNameById={contactNameById}
           contactById={contactById}
           ticketMessages={ticketMessages}
+          ticketMessageAttachmentsByMessageId={ticketMessageAttachmentsByMessageId}
           orgTeamAllocationEnabled={orgTeamAllocationEnabled}
           teamMemberIdsByTeam={teamMemberIdsByTeam}
           slaFirstResponseHours={slaFirstResponseHours}
@@ -544,6 +548,7 @@ export function TasksWorkspace({
           templates={formTemplates}
           usage={formTemplateUsage}
           vocabTask={vocabTask}
+          customFieldDefs={customFieldDefs}
           onClose={() => setManagingForms(false)}
         />
       )}

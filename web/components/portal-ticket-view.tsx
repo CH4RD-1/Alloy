@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { addPortalTicketReply } from "@/lib/actions";
+import { addPortalTicketReply, attachPortalTicketMessageFile } from "@/lib/actions";
 import { firstResponseTarget, resolutionTarget, formatDuration } from "@/lib/sla";
 import { StatusChip } from "@/components/task-list-view";
 
@@ -17,36 +17,53 @@ export interface PortalTicket {
   slaResolutionDays: number | null;
   status: { label: string; color: string; key: string; isClosed: boolean };
   resolvedAt: string | null;
-  messages: { id: string; direction: "inbound" | "outbound"; body: string; createdAt: string }[];
+  messages: {
+    id: string;
+    direction: "inbound" | "outbound";
+    body: string;
+    createdAt: string;
+    attachments: { id: string; filename: string; mimeType: string | null; sizeBytes: number | null; url: string | null }[];
+  }[];
 }
 
 // The "come back later, no account" half of the Portal — the page a
 // customer lands on from their per-ticket magic link (see lib/actions.ts's
-// getPortalTicketByToken/addPortalTicketReply and schema.sql's own comment
-// on tasks.portal_access_token). Deliberately read-mostly and narrow: it
-// shows status + the public conversation and lets them add a reply, same
-// shape as the internal task panel's own "Preview as customer" view, but
-// there's no equivalent yet of attaching a file from this side (disclosed
-// gap — the internal task panel's attachments live in a private Storage
-// path this route doesn't have a safe upload story for yet).
+// getPortalTicketByToken/addPortalTicketReply/attachPortalTicketMessageFile
+// and schema.sql's own comment on tasks.portal_access_token). Deliberately
+// read-mostly and narrow: it shows status + the public conversation and
+// lets them add a reply, same shape as the internal task panel's own
+// "Preview as customer" view. Attachments work the same way as the staff
+// side's ConversationSection (components/task-panel.tsx) — stage files,
+// send the reply, then upload each staged file keyed to the new message's
+// id — just through the token-authenticated, service-role action instead
+// of a signed-in one.
 export function PortalTicketView({ ticket, token }: { ticket: PortalTicket; token: string }) {
   const [pending, startTransition] = useTransition();
   const [draft, setDraft] = useState("");
+  const [draftFiles, setDraftFiles] = useState<File[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState(ticket.messages);
 
   function submit() {
     const body = draft.trim();
-    if (!body) return;
+    if (!body && draftFiles.length === 0) return;
     setError(null);
     startTransition(async () => {
       try {
-        await addPortalTicketReply(token, body);
+        const messageId = await addPortalTicketReply(token, body);
+        for (const file of draftFiles) {
+          const formData = new FormData();
+          formData.append("file", file);
+          await attachPortalTicketMessageFile(token, messageId, formData);
+        }
         // Optimistic local append — the server action also revalidates this
         // path, but that only refetches on the next navigation/router
         // action; this keeps the reply visible immediately without one.
-        setMessages((prev) => [...prev, { id: `local-${Date.now()}`, direction: "inbound" as const, body, createdAt: new Date().toISOString() }]);
+        // Staged files aren't reflected here (no signed URL yet for a
+        // freshly-uploaded file) — they'll appear once the page revalidates.
+        setMessages((prev) => [...prev, { id: `local-${Date.now()}`, direction: "inbound" as const, body, createdAt: new Date().toISOString(), attachments: [] }]);
         setDraft("");
+        setDraftFiles([]);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Something went wrong sending that.");
       }
@@ -105,7 +122,8 @@ export function PortalTicketView({ ticket, token }: { ticket: PortalTicket; toke
                 <strong>{m.direction === "inbound" ? ticket.contactName || "You" : ticket.orgName}</strong>
                 <span>{new Date(m.createdAt).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}</span>
               </div>
-              <div className="conversation-body">{m.body}</div>
+              {m.body && <div className="conversation-body">{m.body}</div>}
+              <PortalMessageAttachments attachments={m.attachments} />
             </div>
           ))}
         </div>
@@ -126,9 +144,78 @@ export function PortalTicketView({ ticket, token }: { ticket: PortalTicket; toke
           onChange={(e) => setDraft(e.target.value)}
         />
       </div>
-      <button type="button" className="primary-btn" style={{ marginTop: 6 }} disabled={!draft.trim() || pending} onClick={submit}>
+      <div className="conversation-file-picker">
+        <label className="ghost-btn conversation-attach-btn">
+          📎 Attach
+          <input
+            type="file"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const picked = Array.from(e.target.files ?? []);
+              if (picked.length) setDraftFiles((prev) => [...prev, ...picked]);
+              e.target.value = "";
+            }}
+          />
+        </label>
+        {draftFiles.map((f, i) => (
+          <span key={`${f.name}-${i}`} className="conversation-staged-file">
+            {f.name}
+            <button
+              type="button"
+              className="conversation-staged-file-remove"
+              onClick={() => setDraftFiles((prev) => prev.filter((_, j) => j !== i))}
+            >
+              ✕
+            </button>
+          </span>
+        ))}
+      </div>
+      <button
+        type="button"
+        className="primary-btn"
+        style={{ marginTop: 6 }}
+        disabled={(!draft.trim() && draftFiles.length === 0) || pending}
+        onClick={submit}
+      >
         {pending ? "Sending…" : "Send reply"}
       </button>
+    </div>
+  );
+}
+
+// Portal-side counterpart to MessageAttachments (components/task-panel.tsx)
+// — same image-thumbnail-or-download-chip rendering, just against the plain
+// {filename, mimeType, sizeBytes, url} shape getPortalTicketByToken returns
+// rather than the internal TicketMessageAttachment row type.
+function PortalMessageAttachments({
+  attachments,
+}: {
+  attachments: { id: string; filename: string; mimeType: string | null; sizeBytes: number | null; url: string | null }[];
+}) {
+  if (attachments.length === 0) return null;
+  return (
+    <div className="conversation-attachments">
+      {attachments.map((a) => {
+        const isImage = (a.mimeType ?? "").startsWith("image/");
+        const sizeLabel = a.sizeBytes ? `${Math.max(1, Math.round(a.sizeBytes / 1024))} KB` : "";
+        if (isImage && a.url) {
+          return (
+            <a key={a.id} href={a.url} target="_blank" rel="noreferrer" className="conversation-attachment-thumb-link">
+              <img src={a.url} alt={a.filename} className="conversation-attachment-thumb" />
+            </a>
+          );
+        }
+        return a.url ? (
+          <a key={a.id} href={a.url} target="_blank" rel="noreferrer" className="conversation-attachment-chip">
+            📎 {a.filename} {sizeLabel && <span className="conversation-attachment-size">({sizeLabel})</span>}
+          </a>
+        ) : (
+          <span key={a.id} className="conversation-attachment-chip conversation-attachment-chip-broken">
+            📎 {a.filename}
+          </span>
+        );
+      })}
     </div>
   );
 }

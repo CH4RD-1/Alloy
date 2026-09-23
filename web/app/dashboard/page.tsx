@@ -69,6 +69,7 @@ export default async function DashboardPage() {
         contactNameById={data.contactNameById}
         contactById={data.contactById}
         ticketMessages={data.ticketMessages}
+        ticketMessageAttachmentsByMessageId={data.ticketMessageAttachmentsByMessageId}
         invites={data.invites}
         orgName={data.orgName}
         orgSlug={data.orgSlug}

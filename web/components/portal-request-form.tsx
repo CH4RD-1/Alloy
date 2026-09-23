@@ -28,6 +28,7 @@ export function PortalRequestForm({
   const [requesterName, setRequesterName] = useState("");
   const [requesterEmail, setRequesterEmail] = useState("");
   const [title, setTitle] = useState(initialTitle ?? "");
+  const [description, setDescription] = useState("");
   const [values, setValues] = useState<Record<string, string>>({});
   const [submitted, setSubmitted] = useState(false);
   const [portalAccessToken, setPortalAccessToken] = useState<string | null>(null);
@@ -42,6 +43,7 @@ export function PortalRequestForm({
     setRequesterName("");
     setRequesterEmail("");
     setTitle("");
+    setDescription("");
     setValues({});
     setSubmitted(false);
     setPortalAccessToken(null);
@@ -59,6 +61,7 @@ export function PortalRequestForm({
           requesterName,
           requesterEmail,
           title,
+          description,
           values,
         });
         setPortalAccessToken(result.portalAccessToken);
@@ -148,6 +151,15 @@ export function PortalRequestForm({
           <div className="field-group">
             <span className="field-label">Short summary</span>
             <input className="text-input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Laptop won't turn on" />
+          </div>
+          <div className="field-group">
+            <span className="field-label">Description</span>
+            <textarea
+              className="text-input obj-textarea"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="More detail about what's happening…"
+            />
           </div>
 
           {template.fields.length === 0 ? (

@@ -20,6 +20,7 @@ import type {
   FormFieldType,
   ActivityLogEntry,
   TicketMessage,
+  TicketMessageAttachment,
   TicketChannel,
   Contact,
   Asset,
@@ -45,6 +46,7 @@ import {
   sendChannelReply,
   addInternalNote,
   simulateCustomerMessage,
+  attachTicketMessageFile,
 } from "@/lib/actions";
 import { TaskObjects } from "@/components/task-objects";
 import { AssetIcon } from "@/components/asset-icon";
@@ -213,6 +215,7 @@ export function TaskPanel({
   contactNameById,
   contactById,
   ticketMessages,
+  ticketMessageAttachmentsByMessageId,
   orgTeamAllocationEnabled,
   teamMemberIdsByTeam,
   slaFirstResponseHours,
@@ -244,6 +247,7 @@ export function TaskPanel({
   contactNameById: Map<string, string>;
   contactById: Map<string, Contact>;
   ticketMessages: TicketMessage[];
+  ticketMessageAttachmentsByMessageId: Map<string, (TicketMessageAttachment & { url: string | null })[]>;
   orgTeamAllocationEnabled: boolean;
   teamMemberIdsByTeam: Map<string, string[]>;
   slaFirstResponseHours: number;
@@ -426,12 +430,18 @@ export function TaskPanel({
 
           <div className="divider" />
 
-          <ActivitySection
-            entries={activityLog.filter((a) => a.task_id === taskId).slice(0, 25)}
-            statuses={statuses}
-            members={members}
-            contactNameById={contactNameById}
-          />
+          <div className="field-group">
+            <span className="field-label">Description</span>
+            <textarea
+              className="text-input obj-textarea"
+              defaultValue={task.description ?? ""}
+              placeholder="More detailed description of the issue…."
+              onBlur={(e) => {
+                const value = e.target.value;
+                if (value !== (task.description ?? "")) run(() => updateTaskFields(taskId, { description: value || null }));
+              }}
+            />
+          </div>
 
           {project?.is_helpdesk && (
             <>
@@ -439,16 +449,53 @@ export function TaskPanel({
               <ConversationSection
                 channel={task.channel}
                 messages={ticketMessages.filter((m) => m.task_id === taskId)}
+                attachmentsByMessageId={ticketMessageAttachmentsByMessageId}
                 contact={task.contact_id ? contactById.get(task.contact_id) ?? null : null}
                 members={members}
                 pending={pending}
                 portalAccessToken={task.portal_access_token}
-                onSendReply={(body) => run(() => sendChannelReply(taskId, body))}
-                onAddNote={(body) => run(() => addInternalNote(taskId, body))}
-                onSimulateCustomer={(body) => run(() => simulateCustomerMessage(taskId, body))}
+                onSendReply={(body, files) =>
+                  run(async () => {
+                    const messageId = await sendChannelReply(taskId, body);
+                    for (const file of files) {
+                      const formData = new FormData();
+                      formData.append("file", file);
+                      await attachTicketMessageFile(taskId, messageId, formData);
+                    }
+                  })
+                }
+                onAddNote={(body, files) =>
+                  run(async () => {
+                    const messageId = await addInternalNote(taskId, body);
+                    for (const file of files) {
+                      const formData = new FormData();
+                      formData.append("file", file);
+                      await attachTicketMessageFile(taskId, messageId, formData);
+                    }
+                  })
+                }
+                onSimulateCustomer={(body, files) =>
+                  run(async () => {
+                    const messageId = await simulateCustomerMessage(taskId, body);
+                    for (const file of files) {
+                      const formData = new FormData();
+                      formData.append("file", file);
+                      await attachTicketMessageFile(taskId, messageId, formData);
+                    }
+                  })
+                }
               />
             </>
           )}
+
+          <div className="divider" />
+
+          <ActivitySection
+            entries={activityLog.filter((a) => a.task_id === taskId).slice(0, 25)}
+            statuses={statuses}
+            members={members}
+            contactNameById={contactNameById}
+          />
 
           <div className="divider" />
 
@@ -1108,6 +1155,7 @@ function SlaTimer({
 function ConversationSection({
   channel,
   messages,
+  attachmentsByMessageId,
   contact,
   members,
   pending,
@@ -1118,16 +1166,19 @@ function ConversationSection({
 }: {
   channel: TicketChannel;
   messages: TicketMessage[];
+  attachmentsByMessageId: Map<string, (TicketMessageAttachment & { url: string | null })[]>;
   contact: Contact | null;
   members: MemberSummary[];
   pending: boolean;
   portalAccessToken: string | null;
-  onSendReply: (body: string) => void;
-  onAddNote: (body: string) => void;
-  onSimulateCustomer: (body: string) => void;
+  onSendReply: (body: string, files: File[]) => void;
+  onAddNote: (body: string, files: File[]) => void;
+  onSimulateCustomer: (body: string, files: File[]) => void;
 }) {
   const [draft, setDraft] = useState("");
+  const [draftFiles, setDraftFiles] = useState<File[]>([]);
   const [simulateDraft, setSimulateDraft] = useState("");
+  const [simulateFiles, setSimulateFiles] = useState<File[]>([]);
   const [showSimulate, setShowSimulate] = useState(false);
   const [previewAsCustomer, setPreviewAsCustomer] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
@@ -1194,7 +1245,8 @@ function ConversationSection({
                   </strong>
                   <span>{timeAgo(m.created_at)}</span>
                 </div>
-                <div className="conversation-body">{m.body}</div>
+                {m.body && <div className="conversation-body">{m.body}</div>}
+                <MessageAttachments attachments={attachmentsByMessageId.get(m.id) ?? []} />
               </div>
             );
           })}
@@ -1211,27 +1263,30 @@ function ConversationSection({
               onChange={(e) => setDraft(e.target.value)}
             />
           </div>
+          <ComposeFilePicker files={draftFiles} onChange={setDraftFiles} />
           <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
             <button
               className="small-btn"
-              disabled={!draft.trim() || pending}
+              disabled={(!draft.trim() && draftFiles.length === 0) || pending}
               onClick={() => {
                 const body = draft.trim();
-                if (!body) return;
-                onSendReply(body);
+                if (!body && draftFiles.length === 0) return;
+                onSendReply(body, draftFiles);
                 setDraft("");
+                setDraftFiles([]);
               }}
             >
               Send public reply
             </button>
             <button
               className="small-btn"
-              disabled={!draft.trim() || pending}
+              disabled={(!draft.trim() && draftFiles.length === 0) || pending}
               onClick={() => {
                 const body = draft.trim();
-                if (!body) return;
-                onAddNote(body);
+                if (!body && draftFiles.length === 0) return;
+                onAddNote(body, draftFiles);
                 setDraft("");
+                setDraftFiles([]);
               }}
             >
               Add private note
@@ -1239,27 +1294,31 @@ function ConversationSection({
           </div>
 
           {showSimulate ? (
-            <div className="add-inline" style={{ marginTop: 8, alignItems: "flex-start" }}>
-              <textarea
-                className="text-input"
-                rows={2}
-                placeholder={`Simulate a message from ${contactLabel}…`}
-                value={simulateDraft}
-                onChange={(e) => setSimulateDraft(e.target.value)}
-              />
-              <button
-                className="small-btn"
-                disabled={!simulateDraft.trim() || pending}
-                onClick={() => {
-                  const body = simulateDraft.trim();
-                  if (!body) return;
-                  onSimulateCustomer(body);
-                  setSimulateDraft("");
-                  setShowSimulate(false);
-                }}
-              >
-                Send
-              </button>
+            <div style={{ marginTop: 8 }}>
+              <div className="add-inline" style={{ alignItems: "flex-start" }}>
+                <textarea
+                  className="text-input"
+                  rows={2}
+                  placeholder={`Simulate a message from ${contactLabel}…`}
+                  value={simulateDraft}
+                  onChange={(e) => setSimulateDraft(e.target.value)}
+                />
+                <button
+                  className="small-btn"
+                  disabled={(!simulateDraft.trim() && simulateFiles.length === 0) || pending}
+                  onClick={() => {
+                    const body = simulateDraft.trim();
+                    if (!body && simulateFiles.length === 0) return;
+                    onSimulateCustomer(body, simulateFiles);
+                    setSimulateDraft("");
+                    setSimulateFiles([]);
+                    setShowSimulate(false);
+                  }}
+                >
+                  Send
+                </button>
+              </div>
+              <ComposeFilePicker files={simulateFiles} onChange={setSimulateFiles} />
             </div>
           ) : (
             <button className="ghost-btn" style={{ marginTop: 8 }} onClick={() => setShowSimulate(true)}>
@@ -1268,6 +1327,73 @@ function ConversationSection({
           )}
         </>
       )}
+    </div>
+  );
+}
+
+// A small file-picker row under a Conversation compose box — native
+// multi-file input plus a list of what's staged (with a per-file remove),
+// sent along with the message it's attached to (see ConversationSection's
+// onSendReply/onAddNote/onSimulateCustomer — task-panel.tsx uploads each
+// staged file via attachTicketMessageFile right after the message itself
+// is created, since a file has to be keyed to a real message id).
+function ComposeFilePicker({ files, onChange }: { files: File[]; onChange: (files: File[]) => void }) {
+  return (
+    <div className="conversation-file-picker">
+      <label className="ghost-btn conversation-attach-btn">
+        📎 Attach
+        <input
+          type="file"
+          multiple
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const picked = Array.from(e.target.files ?? []);
+            if (picked.length) onChange([...files, ...picked]);
+            e.target.value = "";
+          }}
+        />
+      </label>
+      {files.map((f, i) => (
+        <span key={`${f.name}-${i}`} className="conversation-staged-file">
+          {f.name}
+          <button type="button" className="conversation-staged-file-remove" onClick={() => onChange(files.filter((_, j) => j !== i))}>
+            ✕
+          </button>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// Renders a message's own attachments (if any) inline under its bubble —
+// an image gets a small clickable thumbnail, anything else a filename chip
+// with its size — both open the signed URL in a new tab. `url` is null only
+// if the 1hr signed URL failed to generate (surfaced as plain disabled
+// text rather than a dead link).
+function MessageAttachments({ attachments }: { attachments: (TicketMessageAttachment & { url: string | null })[] }) {
+  if (attachments.length === 0) return null;
+  return (
+    <div className="conversation-attachments">
+      {attachments.map((a) => {
+        const isImage = (a.mime_type ?? "").startsWith("image/");
+        const sizeLabel = a.size_bytes ? `${Math.max(1, Math.round(a.size_bytes / 1024))} KB` : "";
+        if (isImage && a.url) {
+          return (
+            <a key={a.id} href={a.url} target="_blank" rel="noreferrer" className="conversation-attachment-thumb-link">
+              <img src={a.url} alt={a.filename} className="conversation-attachment-thumb" />
+            </a>
+          );
+        }
+        return a.url ? (
+          <a key={a.id} href={a.url} target="_blank" rel="noreferrer" className="conversation-attachment-chip">
+            📎 {a.filename} {sizeLabel && <span className="conversation-attachment-size">({sizeLabel})</span>}
+          </a>
+        ) : (
+          <span key={a.id} className="conversation-attachment-chip conversation-attachment-chip-broken">
+            📎 {a.filename}
+          </span>
+        );
+      })}
     </div>
   );
 }

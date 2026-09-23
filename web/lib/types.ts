@@ -220,6 +220,19 @@ export interface TicketMessage {
   created_at: string;
 }
 
+// A file attached directly to a conversation message — see
+// ticket_message_attachments' own comment in schema.sql. Read paths attach
+// a signed `url` (1hr, same pattern as TaskObjectFile's own) alongside the
+// stored row, generated server-side since the bucket is private.
+export interface TicketMessageAttachment {
+  id: string;
+  ticket_message_id: string;
+  storage_path: string;
+  filename: string;
+  mime_type: string | null;
+  size_bytes: number | null;
+}
+
 // Append-only audit trail (activity_log). Scope matches the prototype's own
 // logActivity() exactly: only a task's creation and its status moves are
 // recorded — no field-edit history, matching how the prototype never

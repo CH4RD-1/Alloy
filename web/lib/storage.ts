@@ -34,3 +34,12 @@ export function sanitizeFilename(name: string): string {
   const stripped = name.trim().replace(/[/\\]/g, "_").replace(/[^a-zA-Z0-9._-]/g, "_");
   return stripped.slice(0, 200) || "file";
 }
+
+// Same bucket, same org_id-first-segment RLS shape as taskAttachmentPath
+// above, just nested under a message id instead of a task_object_id — see
+// ticket_message_attachments' own comment in schema.sql for why this is a
+// separate table (and so a separate path shape) rather than reusing
+// task_object_files.
+export function ticketMessageAttachmentPath(orgId: string, taskId: string, messageId: string, filename: string): string {
+  return `${orgId}/${taskId}/messages/${messageId}/${filename}`;
+}

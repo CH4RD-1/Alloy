@@ -19,6 +19,7 @@ import type {
   CustomFieldDef,
   ActivityLogEntry,
   TicketMessage,
+  TicketMessageAttachment,
   Contact,
   Invite,
   SubscriptionStatus,
@@ -118,6 +119,11 @@ export interface WorkspaceData {
   // org-wide — the task panel's Conversation section filters this by
   // task_id the same way the Activity section filters activityLog above.
   ticketMessages: TicketMessage[];
+  // Files attached directly to a conversation message, grouped by message
+  // id — the task panel's ConversationSection renders these inline under
+  // the message bubble they belong to, same idea as taskObjectFileByObjectId
+  // below but keyed per-message since one message can carry several files.
+  ticketMessageAttachmentsByMessageId: Map<string, (TicketMessageAttachment & { url: string | null })[]>;
   // Pending/accepted invites for this org — the Workflow & roles panel's
   // Invite section reads this. RLS (invites_admin_manage) already scopes
   // the underlying query to owner/admin callers only, so a non-admin's own
@@ -260,6 +266,30 @@ export async function getWorkspaceData(userId: string): Promise<WorkspaceData | 
     });
   }
 
+  const messageIds = (ticketMessages ?? []).map((m) => m.id);
+  const ticketMessageAttachmentsByMessageId = new Map<string, (TicketMessageAttachment & { url: string | null })[]>();
+  if (messageIds.length) {
+    const { data: messageAttachmentRows } = await supabase
+      .from("ticket_message_attachments")
+      .select("*")
+      .in("ticket_message_id", messageIds);
+    const rows = (messageAttachmentRows ?? []) as TicketMessageAttachment[];
+    const signedByPath = new Map<string, string>();
+    if (rows.length) {
+      const { data: signedRows } = await supabase.storage
+        .from(TASK_ATTACHMENTS_BUCKET)
+        .createSignedUrls(rows.map((r) => r.storage_path), 3600);
+      (signedRows ?? []).forEach((s) => {
+        if (s.signedUrl && s.path) signedByPath.set(s.path, s.signedUrl);
+      });
+    }
+    rows.forEach((row) => {
+      const list = ticketMessageAttachmentsByMessageId.get(row.ticket_message_id) ?? [];
+      list.push({ ...row, url: signedByPath.get(row.storage_path) ?? null });
+      ticketMessageAttachmentsByMessageId.set(row.ticket_message_id, list);
+    });
+  }
+
   const taskIds = (tasks ?? []).map((t) => t.id);
 
   const tagsByTask = new Map<string, string[]>();
@@ -379,6 +409,7 @@ export async function getWorkspaceData(userId: string): Promise<WorkspaceData | 
     contactNameById,
     contactById,
     ticketMessages: (ticketMessages ?? []) as TicketMessage[],
+    ticketMessageAttachmentsByMessageId,
     invites: (invites ?? []) as Invite[],
   };
 }

@@ -339,6 +339,11 @@ function CodeCard({
   const [localCode, setLocalCode] = useState(savedCode);
   const [localLanguage, setLocalLanguage] = useState(savedLanguage);
   const [copied, setCopied] = useState(false);
+  // Long blocks default to a fixed-height, scrollable view rather than
+  // pushing the rest of the task panel down — the expand arrow (bottom-right
+  // of the block) reveals the whole thing when needed. Starts collapsed
+  // whenever there's saved code to show.
+  const [collapsed, setCollapsed] = useState(() => !!savedCode);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -422,9 +427,22 @@ function CodeCard({
           autoFocus
         />
       ) : localCode ? (
-        <pre className="code-block-pre" onClick={() => setEditing(true)} title="Click to edit">
-          <code className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
-        </pre>
+        <div className={"code-block-pre-wrap" + (collapsed ? " code-block-collapsed" : "")}>
+          <pre className="code-block-pre" onClick={() => setEditing(true)} title="Click to edit">
+            <code className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
+          </pre>
+          <button
+            type="button"
+            className="code-block-collapse-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              setCollapsed((c) => !c);
+            }}
+            title={collapsed ? "Expand" : "Collapse"}
+          >
+            {collapsed ? "▽" : "△"}
+          </button>
+        </div>
       ) : (
         <div className="code-block-empty" onClick={() => setEditing(true)}>
           Click to add code…
