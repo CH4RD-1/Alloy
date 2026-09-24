@@ -418,8 +418,23 @@ export async function addLink(
 
   const { data: bothTasks } = await supabase
     .from("tasks")
-    .select("id, projects ( is_helpdesk )")
+    .select("id, parent_task_id, projects ( is_helpdesk )")
     .in("id", [fromTaskId, toTaskId]);
+
+  // A direct parent<->child pair can never be linked, any link type — the
+  // subtask containment engine (lib/gantt-schedule.ts) already governs
+  // that relationship (a subtask can never fall outside its parent's own
+  // duration), and a Block/Concurrent/Clone link on top of it would just
+  // fight or duplicate that same logic. Rejected loudly (an Error, not a
+  // silent no-op) so whoever tried it sees why — both the task panel's
+  // Links section and the Gantt's drag-to-link already surface a thrown
+  // error as a banner via their own run()/commitLink() catch blocks, so
+  // this needs no UI change to be visible.
+  const fromTask = (bothTasks ?? []).find((t: any) => t.id === fromTaskId);
+  const toTask = (bothTasks ?? []).find((t: any) => t.id === toTaskId);
+  if (fromTask?.parent_task_id === toTaskId || toTask?.parent_task_id === fromTaskId) {
+    throw new Error("A task can't be linked directly to its own parent or subtask.");
+  }
 
   const eitherHelpdesk = (bothTasks ?? []).some((t: any) => t.projects?.is_helpdesk);
   const effectiveType = eitherHelpdesk && (linkType === "concurrent" || linkType === "clone") ? "blocked" : linkType;

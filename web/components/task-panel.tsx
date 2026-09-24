@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { TaskRow } from "@/lib/list-view";
-import { hueFor, initials, fmtDate, MAX_TASK_DEPTH } from "@/lib/list-view";
+import { hueFor, initials, MAX_TASK_DEPTH } from "@/lib/list-view";
+import { taskDurationDays, type DurationUnit, DURATION_UNITS, addDurationToDate } from "@/lib/date-only";
+import { DateGuideField } from "@/components/date-guide-field";
 import type {
   WorkflowStatus,
   WorkflowTransition,
@@ -61,66 +63,6 @@ const LINK_TYPE_META: Record<string, { label: string; className: string }> = {
   related: { label: "Related", className: "link-type-related" },
   clone: { label: "Clone", className: "link-type-clone" },
 };
-
-// Small date-only ("YYYY-MM-DD", as produced by <input type="date">) helpers
-// for the task Dates field-group's "Duration" box below — parsed/formatted
-// via Date.UTC so local-timezone offsets never shift the day by one.
-function parseDateOnly(value: string): Date | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (!m) return null;
-  return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
-}
-function formatDateOnly(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
-// Duration = number of days between start and due (due - start), so a
-// same-day task has a duration of 0.
-function taskDurationDays(start: string | null | undefined, due: string | null | undefined): number | null {
-  const s = start ? parseDateOnly(start) : null;
-  const e = due ? parseDateOnly(due) : null;
-  if (!s || !e) return null;
-  const days = Math.round((e.getTime() - s.getTime()) / 86400000);
-  return days >= 0 ? days : null;
-}
-// Duration box units (see DurationField below) — hours/weeks/months/years
-// all resolve to a whole number of days added to start_date, since
-// start_date/due_date are date-only columns with no time component.
-// Months/years use real calendar arithmetic (setUTCMonth/setUTCFullYear)
-// rather than a flat *30/*365 multiply, so "1 month" from Jan 31 lands on
-// Feb 28 the way a calendar would, not 30 days later.
-type DurationUnit = "hours" | "days" | "weeks" | "months" | "years";
-const DURATION_UNITS: { value: DurationUnit; label: string }[] = [
-  { value: "hours", label: "Hours" },
-  { value: "days", label: "Days" },
-  { value: "weeks", label: "Weeks" },
-  { value: "months", label: "Months" },
-  { value: "years", label: "Years" },
-];
-function addDurationToDate(start: string, amount: number, unit: DurationUnit): string {
-  const s = parseDateOnly(start);
-  if (!s) return start;
-  switch (unit) {
-    case "hours":
-      // Date-only storage can't represent partial days — round to the
-      // nearest whole day (so e.g. 4 hours stays same-day, 20 hours
-      // becomes +1 day) rather than always rounding up or down.
-      s.setUTCDate(s.getUTCDate() + Math.round(amount / 24));
-      break;
-    case "days":
-      s.setUTCDate(s.getUTCDate() + Math.round(amount));
-      break;
-    case "weeks":
-      s.setUTCDate(s.getUTCDate() + Math.round(amount * 7));
-      break;
-    case "months":
-      s.setUTCMonth(s.getUTCMonth() + Math.round(amount));
-      break;
-    case "years":
-      s.setUTCFullYear(s.getUTCFullYear() + Math.round(amount));
-      break;
-  }
-  return formatDateOnly(s);
-}
 
 // The Duration box under Start/Due Dates on a regular (non-milestone,
 // non-Helpdesk) task. Local component state (seeded once from the task's
@@ -301,6 +243,17 @@ export function TaskPanel({
   }, [effectiveWidth, onWidthChange]);
 
   if (!row || !task) return null;
+
+  // The Dates field-group's calendar guide, once this task is itself a
+  // subtask: shows the parent's own current [start, due] range behind the
+  // day cells, exactly like the new-subtask flow does — the containment
+  // engine (see lib/gantt-schedule.ts) already keeps this task's own
+  // range inside its parent's, so surfacing that same range here too
+  // keeps the visual guide consistent with what editing will actually
+  // enforce. null/null (no shading) for a top-level task.
+  const parentRow = task.parent_task_id ? allRows.find((r) => r.task.id === task.parent_task_id) : undefined;
+  const parentGuideStart = parentRow?.task.start_date ?? null;
+  const parentGuideDue = parentRow?.task.due_date ?? null;
 
   if (task.kind === "asset_allocation") {
     return (
@@ -582,33 +535,29 @@ export function TaskPanel({
                 Milestone
               </label>
               {task.is_milestone ? (
-                <input
-                  type="date"
-                  className="text-input"
-                  defaultValue={task.start_date ?? ""}
-                  onBlur={(e) => run(() => updateTaskFields(taskId, { start_date: e.target.value, due_date: e.target.value }))}
+                <DateGuideField
+                  value={task.start_date ?? ""}
+                  onChange={(v) => run(() => updateTaskFields(taskId, { start_date: v, due_date: v }))}
+                  guideStart={parentGuideStart}
+                  guideDue={parentGuideDue}
                 />
               ) : (
                 <>
                   <div className="date-box-row">
-                    <label className="date-box">
-                      <span className="date-box-label">Start</span>
-                      <input
-                        type="date"
-                        className="text-input"
-                        defaultValue={task.start_date ?? ""}
-                        onBlur={(e) => run(() => updateTaskFields(taskId, { start_date: e.target.value }))}
-                      />
-                    </label>
-                    <label className="date-box">
-                      <span className="date-box-label">Due</span>
-                      <input
-                        type="date"
-                        className="text-input"
-                        defaultValue={task.due_date ?? ""}
-                        onBlur={(e) => run(() => updateTaskFields(taskId, { due_date: e.target.value }))}
-                      />
-                    </label>
+                    <DateGuideField
+                      label="Start"
+                      value={task.start_date ?? ""}
+                      onChange={(v) => run(() => updateTaskFields(taskId, { start_date: v }))}
+                      guideStart={parentGuideStart}
+                      guideDue={parentGuideDue}
+                    />
+                    <DateGuideField
+                      label="Due"
+                      value={task.due_date ?? ""}
+                      onChange={(v) => run(() => updateTaskFields(taskId, { due_date: v }))}
+                      guideStart={parentGuideStart}
+                      guideDue={parentGuideDue}
+                    />
                   </div>
                   <DurationField
                     key={taskId}
@@ -955,18 +904,16 @@ function AssetAllocationPanel({
 
           <div className="field-group">
             <span className="field-label">Dates</span>
-            <div className="field-row">
-              <input
-                type="date"
-                className="text-input"
-                defaultValue={task.start_date ?? ""}
-                onBlur={(e) => run(() => updateTaskFields(task.id, { start_date: e.target.value }))}
+            <div className="date-box-row">
+              <DateGuideField
+                label="Start"
+                value={task.start_date ?? ""}
+                onChange={(v) => run(() => updateTaskFields(task.id, { start_date: v }))}
               />
-              <input
-                type="date"
-                className="text-input"
-                defaultValue={task.due_date ?? ""}
-                onBlur={(e) => run(() => updateTaskFields(task.id, { due_date: e.target.value }))}
+              <DateGuideField
+                label="Due"
+                value={task.due_date ?? ""}
+                onChange={(v) => run(() => updateTaskFields(task.id, { due_date: v }))}
               />
             </div>
           </div>
@@ -1465,14 +1412,7 @@ function CustomFieldControl({
     );
   }
   if (type === "date") {
-    return (
-      <input
-        className="text-input mono"
-        type="date"
-        defaultValue={typeof value === "string" ? value : ""}
-        onChange={(e) => onChange(e.target.value || null)}
-      />
-    );
+    return <DateGuideField value={typeof value === "string" ? value : ""} onChange={(v) => onChange(v || null)} />;
   }
   if (type === "yes_no") {
     // Locally controlled (unlike the rest of this component's uncontrolled
@@ -1509,170 +1449,6 @@ function YesNoControl({ value, onChange }: { value: boolean; onChange: (value: b
       />
       <span style={{ fontSize: 12.5, color: "var(--text-muted)" }}>{checked ? "Yes" : "No"}</span>
     </label>
-  );
-}
-
-// A small inline calendar popover used only by the new-subtask date
-// fields below — not a replacement for the plain native <input type=date>
-// used everywhere else in this panel (those stay exactly as they were).
-// This exists purely because a native date input's own picker can't be
-// customized to shade specific days, and the whole point here is to show
-// the parent task's current [start, due] range as a visual guide while
-// picking a new subtask's dates — "no subtask should exist outside its
-// parent's duration" is much easier to keep in mind with the parent's own
-// range highlighted right on the calendar you're picking from.
-function MiniCalendarPopover({
-  value,
-  guideStart,
-  guideDue,
-  onSelect,
-  onClose,
-}: {
-  value: string; // "" or yyyy-mm-dd
-  guideStart: string | null;
-  guideDue: string | null;
-  onSelect: (iso: string) => void;
-  onClose: () => void;
-}) {
-  const anchor = parseDateOnly(value) ?? parseDateOnly(guideStart ?? "") ?? new Date();
-  const [viewYear, setViewYear] = useState(anchor.getUTCFullYear());
-  const [viewMonth, setViewMonth] = useState(anchor.getUTCMonth()); // 0-11
-
-  const first = new Date(Date.UTC(viewYear, viewMonth, 1));
-  const startWeekday = (first.getUTCDay() + 6) % 7; // Monday-first grid
-  const daysInMonth = new Date(Date.UTC(viewYear, viewMonth + 1, 0)).getUTCDate();
-  const monthLabel = first.toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
-
-  function goMonth(delta: number) {
-    let m = viewMonth + delta;
-    let y = viewYear;
-    if (m < 0) {
-      m = 11;
-      y -= 1;
-    } else if (m > 11) {
-      m = 0;
-      y += 1;
-    }
-    setViewMonth(m);
-    setViewYear(y);
-  }
-
-  function isoFor(day: number): string {
-    return formatDateOnly(new Date(Date.UTC(viewYear, viewMonth, day)));
-  }
-  function inGuideRange(iso: string): boolean {
-    return !!guideStart && !!guideDue && iso >= guideStart && iso <= guideDue;
-  }
-
-  const cells: (number | null)[] = Array(startWeekday).fill(null);
-  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
-
-  return (
-    <div className="mini-calendar-popover" onClick={(e) => e.stopPropagation()}>
-      <div className="mini-calendar-head">
-        <button type="button" className="mini-calendar-nav" onClick={() => goMonth(-1)} aria-label="Previous month">
-          ‹
-        </button>
-        <span>{monthLabel}</span>
-        <button type="button" className="mini-calendar-nav" onClick={() => goMonth(1)} aria-label="Next month">
-          ›
-        </button>
-      </div>
-      {guideStart && guideDue && (
-        <div className="mini-calendar-guide-note">
-          <span className="mini-calendar-guide-swatch" /> Parent: {fmtDate(guideStart)} → {fmtDate(guideDue)}
-        </div>
-      )}
-      <div className="mini-calendar-weekdays">
-        {["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map((d) => (
-          <span key={d}>{d}</span>
-        ))}
-      </div>
-      <div className="mini-calendar-grid">
-        {cells.map((day, i) => {
-          if (day === null) return <span key={`e${i}`} className="mini-calendar-cell empty" />;
-          const iso = isoFor(day);
-          return (
-            <button
-              key={iso}
-              type="button"
-              className={`mini-calendar-cell ${inGuideRange(iso) ? "guided" : ""} ${iso === value ? "selected" : ""}`}
-              onClick={() => {
-                onSelect(iso);
-                onClose();
-              }}
-            >
-              {day}
-            </button>
-          );
-        })}
-      </div>
-      <div className="mini-calendar-foot">
-        <button
-          type="button"
-          className="mini-calendar-foot-btn"
-          onClick={() => {
-            onSelect(formatDateOnly(new Date()));
-            onClose();
-          }}
-        >
-          Today
-        </button>
-        <button
-          type="button"
-          className="mini-calendar-foot-btn"
-          onClick={() => {
-            onSelect("");
-            onClose();
-          }}
-        >
-          Clear
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// A Start/Due box matching the panel's existing .date-box look (see the
-// task's own Dates field-group above), but backed by MiniCalendarPopover
-// instead of a native <input type=date> — see that component's own
-// comment for why. Closes on an outside click, same convention as the
-// Gantt's floating link-menu.
-function DateGuideField({
-  label,
-  value,
-  onChange,
-  guideStart,
-  guideDue,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  guideStart: string | null;
-  guideDue: string | null;
-}) {
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function onDocMouseDown(e: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onDocMouseDown);
-    return () => document.removeEventListener("mousedown", onDocMouseDown);
-  }, [open]);
-
-  return (
-    <div className="date-box date-guide-field" ref={containerRef}>
-      <span className="date-box-label">{label}</span>
-      <button type="button" className="text-input date-guide-trigger" onClick={() => setOpen((o) => !o)}>
-        {value ? fmtDate(value) : "Select date"}
-      </button>
-      {open && (
-        <MiniCalendarPopover value={value} guideStart={guideStart} guideDue={guideDue} onSelect={onChange} onClose={() => setOpen(false)} />
-      )}
-    </div>
   );
 }
 

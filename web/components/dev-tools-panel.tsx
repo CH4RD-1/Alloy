@@ -6,6 +6,7 @@ import type { Role, Project, DevTools } from "@/lib/types";
 import type { ProjectTemplateV1 } from "@/lib/actions";
 import type { MemberSummary } from "@/lib/tasks-data";
 import { updateDevTools, createDummyUser, deleteDummyUser, exportProjectTemplate, importProjectTemplate } from "@/lib/actions";
+import { DateGuideField } from "@/components/date-guide-field";
 
 const ALL_ROLES: { id: Role; name: string }[] = [
   { id: "standard", name: "Standard" },
@@ -353,12 +354,7 @@ export function DevToolsPanel({
                             </div>
                             <div className="field-group" style={{ marginTop: 8 }}>
                               <span className="field-label">Start date (day 0 for the template&apos;s dates)</span>
-                              <input
-                                type="date"
-                                className="text-input"
-                                value={importStartDate}
-                                onChange={(e) => setImportStartDate(e.target.value)}
-                              />
+                              <DateGuideField value={importStartDate} onChange={setImportStartDate} />
                             </div>
                             <button className="primary-btn" style={{ marginTop: 10 }} disabled={pending} onClick={handleImport}>
                               Import as new project

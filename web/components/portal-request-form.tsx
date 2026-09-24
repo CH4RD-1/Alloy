@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import type { FormTemplate } from "@/lib/types";
 import { submitPortalRequest } from "@/lib/actions";
+import { DateGuideField } from "@/components/date-guide-field";
 
 // Ported from the prototype's Portal request form (renderPortalView / the
 // portalDraft state + submit-portal-request handler) — pick a template,
@@ -196,11 +197,9 @@ export function PortalRequestForm({
                     onChange={(e) => setValues((v) => ({ ...v, [f.id]: e.target.value }))}
                   />
                 ) : f.type === "date" ? (
-                  <input
-                    className="text-input mono"
-                    type="date"
+                  <DateGuideField
                     value={values[f.id] ?? ""}
-                    onChange={(e) => setValues((v) => ({ ...v, [f.id]: e.target.value }))}
+                    onChange={(v) => setValues((v2) => ({ ...v2, [f.id]: v }))}
                   />
                 ) : f.type === "yes_no" ? (
                   <label className="checkbox-row">

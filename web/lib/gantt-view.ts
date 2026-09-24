@@ -156,8 +156,13 @@ export function computeGanttLayout(rows: GanttRow[], todayIso: string, minWidthP
 
   const geom: Geom[] = rows.map((r, i) => {
     const t = r.row.task;
-    const y = HEADER_H + i * ROW_H + (r.depth > 0 ? 7 : 5);
-    const h = r.depth > 0 ? 18 : 22;
+    // Each level of nesting draws a narrower bar than its parent's — a
+    // top-level task's own bar, a subtask's (matches the pre-round-8
+    // "sub" bar size), and a sub-subtask's smaller still — the same +2px
+    // top-offset/-4px height step repeated once more for the second
+    // level of nesting.
+    const y = HEADER_H + i * ROW_H + (r.depth >= 2 ? 9 : r.depth === 1 ? 7 : 5);
+    const h = r.depth >= 2 ? 14 : r.depth === 1 ? 18 : 22;
     const nodeCY = y + h / 2;
     if (t.is_milestone) {
       const s = 7;

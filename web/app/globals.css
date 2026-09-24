@@ -874,7 +874,14 @@ textarea.text-input {
   flex: 1;
 }
 
-/* ============ NEW-SUBTASK DATES + MINI CALENDAR GUIDE ============ */
+/* ============ NEW-SUBTASK DATES SECTION ============ */
+/* .add-inline-with-dates/.new-subtask-dates/.new-subtask-actions below are
+   specific to the "+ Add subtask" form's own reveal-on-focus Dates
+   section (see NewSubtaskForm in task-panel.tsx). The calendar widget
+   itself — .date-guide-field/.mini-calendar-* — is its own, separate,
+   app-wide component (components/date-guide-field.tsx) used by every
+   date field in Alloy, not just this one; it just happens to live in this
+   same CSS block since both landed in the same round of work. */
 .add-inline-with-dates {
   margin-top: 8px;
 }
@@ -1722,8 +1729,8 @@ textarea.text-input {
 }
 .code-block-collapse-btn {
   position: absolute;
-  right: 8px;
-  bottom: 8px;
+  right: 20px;
+  bottom: 22px;
   width: 26px;
   height: 26px;
   border-radius: 50%;

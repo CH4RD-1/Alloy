@@ -6,6 +6,7 @@ import type { Team, Project } from "@/lib/types";
 import type { MemberSummary } from "@/lib/tasks-data";
 import { createTask } from "@/lib/actions";
 import { eligibleAssignees } from "@/lib/team-allocation";
+import { DateGuideField } from "@/components/date-guide-field";
 
 export function NewTaskPanel({
   orgId,
@@ -175,11 +176,11 @@ export function NewTaskPanel({
               Milestone
             </label>
             {isMilestone ? (
-              <input type="date" className="text-input" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+              <DateGuideField value={startDate} onChange={setStartDate} />
             ) : (
-              <div className="field-row">
-                <input type="date" className="text-input" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
-                <input type="date" className="text-input" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+              <div className="date-box-row">
+                <DateGuideField label="Start" value={startDate} onChange={setStartDate} />
+                <DateGuideField label="Due" value={dueDate} onChange={setDueDate} />
               </div>
             )}
           </div>
