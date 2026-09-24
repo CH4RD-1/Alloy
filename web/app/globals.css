@@ -2649,6 +2649,106 @@ textarea.text-input {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   overflow: hidden;
+  overflow-x: auto;
+}
+
+/* Workload tint levels — 0 free, 1 normal, 2 busy, 3 overloaded (see
+   lib/calendar-view.ts's loadLevel for the disclosed "count of overlapping
+   tasks" simplification behind these). Shared by the "rows" layout's day
+   cells and the "grid" layout's workload summary pills. */
+.cal-load-0 {
+  background: var(--surface);
+}
+.cal-load-1 {
+  background: color-mix(in srgb, var(--progress) 11%, var(--surface));
+}
+.cal-load-2 {
+  background: color-mix(in srgb, var(--warn) 18%, var(--surface));
+}
+.cal-load-3 {
+  background: color-mix(in srgb, var(--blocked) 20%, var(--surface));
+}
+
+/* ---- "Rows" layout — one row per person, spanning the whole month ---- */
+.cal-rows {
+  display: flex;
+  flex-direction: column;
+}
+.cal-rows-header {
+  display: grid;
+  border-bottom: 1px solid var(--border-strong);
+}
+.cal-daynum.cal-rows-daynum {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 2px;
+  border-right: 1px solid var(--border);
+}
+.cal-daynum.cal-rows-daynum.weekend {
+  background: var(--surface-2);
+}
+.cal-personrow {
+  display: grid;
+  position: relative;
+  border-bottom: 1px solid var(--border);
+}
+.cal-personrow:last-child {
+  border-bottom: none;
+}
+button.cal-daycell-bg {
+  appearance: none;
+  -webkit-appearance: none;
+  border: none;
+  border-right: 1px solid var(--border);
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  cursor: default;
+}
+.cal-load-0.cal-daycell-bg {
+  cursor: pointer;
+}
+.cal-load-0.cal-daycell-bg:hover {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+.cal-daycell-bg.cal-day-today-col {
+  border-left: 1px solid var(--accent);
+  border-right: 1px solid var(--accent);
+}
+
+/* ---- "Grid" layout — the classic 7-column month grid ---- */
+.cal-workload-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.cal-workload-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+}
+.cal-workload-name {
+  color: var(--text);
+}
+.cal-workload-peak {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface);
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .cal-month {
@@ -2657,9 +2757,6 @@ textarea.text-input {
 }
 .cal-day-dim {
   opacity: 0.45;
-}
-.cal-week-solo {
-  padding-bottom: 4px;
 }
 
 .cal-week {
@@ -2674,7 +2771,7 @@ textarea.text-input {
   border-right: 1px solid var(--border);
 }
 .cal-daycell-bg.weekend {
-  background: var(--surface-2);
+  box-shadow: inset 0 0 0 9999px rgba(127, 127, 127, 0.07);
 }
 
 .cal-daynum {
@@ -2731,10 +2828,6 @@ textarea.text-input {
   margin-right: 4px;
 }
 
-.cal-byperson {
-  display: grid;
-  align-items: stretch;
-}
 .cal-byperson-corner {
   grid-column: 1;
   grid-row: 1;
@@ -2749,30 +2842,6 @@ textarea.text-input {
   font-size: 12.5px;
   border-right: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
-}
-.cal-byperson-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 5px;
-  border-right: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  min-height: 46px;
-}
-.cal-byperson-add {
-  width: 100%;
-  height: 100%;
-  min-height: 32px;
-  background: none;
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-faint);
-  font-size: 15px;
-  font-weight: 700;
-}
-.cal-byperson-add:hover {
-  color: var(--accent-strong);
-  border-color: var(--accent);
 }
 
 .cal-allocate-row {

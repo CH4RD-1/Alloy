@@ -1,28 +1,36 @@
-// Pure, framework-agnostic helpers for the Calendar view — ported from the
-// prototype's renderCalendarView() / v0.16 "team grouping & day-by-day
-// allocation" redesign (see alloy-development-log.md). No React, no
-// Supabase — components/calendar-view.tsx wires this up to state and
-// server actions.
+// Pure, framework-agnostic helpers for the Calendar view — Round 10's
+// ground-up rebuild (see alloy-development-log.md's Round 10 entry). No
+// React, no Supabase — components/calendar-view.tsx wires this up to state
+// and server actions.
 //
-// Two disclosed simplifications from the prototype, both consistent with
-// choices already made elsewhere in this port:
-//   1. Bar/chip coloring uses the same TaskRow.teamColor accent every other
-//      ported view (List/Buckets/Gantt) already uses, not the prototype's
-//      "mine vs. others" muted convention — that convention was never
-//      actually carried into this port's Gantt/Buckets views (they only
-//      ever used teamColor), so Calendar matches what's really here rather
-//      than a prototype behavior this port doesn't otherwise have.
-//   2. "Allocate to <Name>" reuses the existing updateTaskFields action
-//      (no new server action needed — it already accepts assignee_id/
-//      start_date/due_date) via allocationPatch() below, which preserves
-//      the task's original duration. It deliberately does NOT re-run the
-//      dependency cascade live — matching this port's existing Auto-arrange
-//      being a one-shot server action rather than the prototype's live
-//      propagateSchedule() — so a linked task's own dates are left alone
-//      until Auto-arrange is run again.
+// This calendar is Month-only (the old Week view/mode is gone entirely —
+// an explicit choice, not a stopgap) and offers two layouts, switched by a
+// toggle in the header:
+//   - "rows": one row per person spanning the whole month, with that
+//     person's tasks drawn as bars along their row — modeled on Outlook's
+//     Scheduling Assistant / a shared team calendar. This is the primary,
+//     workload-first view: a packed row IS the "too much on" signal, and
+//     every day cell is click-to-reallocate.
+//   - "grid": the classic 7-column day grid (what the old Month mode
+//     looked like), kept for a more familiar whole-month browse, with a
+//     compact workload summary strip above it standing in for the
+//     row-by-row detail "rows" gives you.
 //
-// Helpdesk-project tasks are excluded (unscheduled, no dates), same as the
-// Gantt (see gantt-view.ts).
+// Workload is a disclosed simplification: the app has no capacity/hours
+// data anywhere in the schema, so "load" is simply the count of tasks
+// that overlap a person on a given day — how many things they're on at
+// once, not a measure of effort. It's an honest, real signal rather than
+// an invented one.
+//
+// Helpdesk-project tasks are excluded (unscheduled, no dates), same rule
+// the Gantt uses (see gantt-view.ts).
+//
+// Date math below is UTC-safe throughout: parse via Date.UTC, manipulate
+// via getUTC*/setUTC* only, format via toISOString() (safe precisely
+// because the Date was built and mutated entirely through UTC methods).
+// The old Calendar's local-parse + UTC-format mismatch (inherited from
+// gantt-schedule.ts's addDays/daysBetween, now fixed at the source) was
+// the root cause of "today" landing under the wrong weekday.
 
 import type { TaskRow } from "./list-view";
 import type { Project, Team } from "./types";
@@ -30,17 +38,21 @@ import { addDays, daysBetween } from "./gantt-schedule";
 import { eligibleAssignees } from "./team-allocation";
 import type { MemberSummary } from "./tasks-data";
 
-export type CalendarMode = "month" | "week";
+export type CalendarLayout = "rows" | "grid";
 
 // ---------------------------------------------------------------------
 // Date-range math
 // ---------------------------------------------------------------------
 
+function utcDow(iso: string): number {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0 = Sun … 6 = Sat
+}
+
 // Monday-start week, matching the rest of this port's en-GB date formatting
 // (fmtDate in list-view.ts) and the Gantt's own Monday grid lines.
 export function startOfWeek(iso: string): string {
-  const d = new Date(iso + "T00:00:00");
-  const dow = d.getDay(); // 0 = Sun … 6 = Sat
+  const dow = utcDow(iso);
   const back = dow === 0 ? 6 : dow - 1;
   return addDays(iso, -back);
 }
@@ -50,14 +62,15 @@ export function startOfMonth(iso: string): string {
 }
 
 export function addMonths(iso: string, n: number): string {
-  const d = new Date(iso + "T00:00:00");
-  d.setMonth(d.getMonth() + n);
-  return d.toISOString().slice(0, 10);
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCMonth(dt.getUTCMonth() + n);
+  return dt.toISOString().slice(0, 10);
 }
 
-// The 6-row (42-day) grid a month view renders, starting on the Monday
-// on/before the 1st and always running a full 6 weeks so the grid height
-// never jumps between months.
+// The 6-row (42-day) grid the "grid" layout renders, starting on the
+// Monday on/before the 1st and always running a full 6 weeks so the grid
+// height never jumps between months.
 export function monthGridStart(iso: string): string {
   return startOfWeek(startOfMonth(iso));
 }
@@ -71,28 +84,32 @@ export function monthGridWeeks(iso: string): string[][] {
   return Array.from({ length: 6 }, (_, w) => weekDays(addDays(gridStart, w * 7)));
 }
 
+// The actual days in the month (28-31 of them, no leading/trailing days
+// from adjacent months) — the "rows" layout's column set, a real month
+// timeline rather than the "grid" layout's padded 7x6 grid.
+export function monthDays(iso: string): string[] {
+  const [y, m] = iso.split("-").map(Number);
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const start = startOfMonth(iso);
+  return Array.from({ length: daysInMonth }, (_, i) => addDays(start, i));
+}
+
 export function isSameMonth(iso: string, monthAnchorIso: string): boolean {
   return iso.slice(0, 7) === monthAnchorIso.slice(0, 7);
 }
 
 export function isWeekend(iso: string): boolean {
-  const dow = new Date(iso + "T00:00:00").getDay();
+  const dow = utcDow(iso);
   return dow === 0 || dow === 6;
 }
 
 export function monthLabel(iso: string): string {
-  const d = new Date(iso + "T00:00:00");
-  return d.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
-}
-
-export function weekRangeLabel(weekStartIso: string): string {
-  const end = addDays(weekStartIso, 6);
-  const d1 = new Date(weekStartIso + "T00:00:00");
-  const d2 = new Date(end + "T00:00:00");
-  const sameMonth = d1.getMonth() === d2.getMonth() && d1.getFullYear() === d2.getFullYear();
-  const startLabel = d1.toLocaleDateString("en-GB", { day: "numeric", month: sameMonth ? undefined : "short" });
-  const endLabel = d2.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
-  return `${startLabel} – ${endLabel}`;
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-GB", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
 }
 
 // ---------------------------------------------------------------------
@@ -113,9 +130,9 @@ export interface CalendarTeamGroup {
 // Groups people by team name (merged across projects, same pattern as the
 // sidebar's own team filter / buckets-view's merge-by-name) rather than by
 // project — a manager scanning for a team doesn't want to know which
-// project someone's tasks happen to sit in first (v0.16). A team's people
-// list is the union of its registered team_members and whoever currently
-// holds a task on it, so a member with zero current tasks still appears.
+// project someone's tasks happen to sit in first. A team's people list is
+// the union of its registered team_members and whoever currently holds a
+// task on it, so a member with zero current tasks still appears.
 export function calendarPeopleGroups(params: {
   teams: Team[];
   rows: TaskRow[];
@@ -196,36 +213,33 @@ export function calendarEvents(params: {
 }
 
 // ---------------------------------------------------------------------
-// Greedy interval-packing lanes (per week row)
+// Greedy interval-packing lanes — shared by the "grid" layout's per-week
+// rows and the "rows" layout's per-person month-wide rows. Sort by start,
+// place each event in the first lane whose last-placed event doesn't
+// overlap it, opening a new lane otherwise. An event that runs past either
+// end of the visible range is clipped to it; the caller is responsible for
+// re-rendering it (its own lane, possibly different) in whatever the next
+// visible range is — the same "one continuous-looking bar via CSS Grid
+// column span, no cross-row JS" approach used throughout this port.
 // ---------------------------------------------------------------------
 
 export interface LanedEvent {
   event: CalendarEvent;
   lane: number;
-  colStart: number; // 1-based day-of-week column within this week row
-  colSpan: number; // clipped to the week's 7 columns
+  colStart: number; // 1-based column within the caller's own range
+  colSpan: number; // clipped to that range's column count
 }
 
-// Packs a week's events into the fewest overlapping "lanes" (rows within
-// the week's grid cell) via the classic greedy interval-scheduling packer:
-// sort by start, and place each event in the first lane whose last-placed
-// event doesn't overlap it, opening a new lane otherwise. An event that
-// spans into an adjacent week is clipped to this week's 7 columns; the
-// caller renders it again (its own lane, possibly different) in the next
-// week's row — the same "one continuous-looking bar via CSS Grid column
-// span, no cross-row JS" approach the prototype used.
-export function packWeekLanes(weekStartIso: string, events: CalendarEvent[]): LanedEvent[] {
-  const weekEnd = addDays(weekStartIso, 6);
-  const inWeek = events.filter((e) => e.start <= weekEnd && e.end >= weekStartIso);
-
-  const sorted = [...inWeek].sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
-  const laneEnds: string[] = []; // laneEnds[i] = last clipped end-date occupying lane i (as a day index sentinel)
+function packLanes(rangeStart: string, rangeEnd: string, events: CalendarEvent[]): LanedEvent[] {
+  const inRange = events.filter((e) => e.start <= rangeEnd && e.end >= rangeStart);
+  const sorted = [...inRange].sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+  const laneEnds: string[] = []; // laneEnds[i] = last clipped end-date occupying lane i
   const result: LanedEvent[] = [];
 
   sorted.forEach((e) => {
-    const clipStart = e.start < weekStartIso ? weekStartIso : e.start;
-    const clipEnd = e.end > weekEnd ? weekEnd : e.end;
-    const colStart = daysBetween(weekStartIso, clipStart) + 1;
+    const clipStart = e.start < rangeStart ? rangeStart : e.start;
+    const clipEnd = e.end > rangeEnd ? rangeEnd : e.end;
+    const colStart = daysBetween(rangeStart, clipStart) + 1;
     const colSpan = daysBetween(clipStart, clipEnd) + 1;
 
     let lane = laneEnds.findIndex((end) => end < clipStart);
@@ -242,25 +256,83 @@ export function packWeekLanes(weekStartIso: string, events: CalendarEvent[]): La
   return result;
 }
 
+export function packWeekLanes(weekStartIso: string, events: CalendarEvent[]): LanedEvent[] {
+  return packLanes(weekStartIso, addDays(weekStartIso, 6), events);
+}
+
 export function laneCount(laned: LanedEvent[]): number {
   return laned.reduce((max, l) => Math.max(max, l.lane + 1), 0);
 }
 
-// ---------------------------------------------------------------------
-// "By person" day-by-day availability grid (Week mode only)
-// ---------------------------------------------------------------------
-
-export interface PersonDayCell {
-  userId: string;
-  date: string;
-  events: CalendarEvent[];
+// A single person's events, lane-packed across the whole visible month
+// (see monthDays) rather than a week at a time — the "rows" layout's bars.
+export function personMonthLanes(monthDaysArr: string[], events: CalendarEvent[]): LanedEvent[] {
+  if (monthDaysArr.length === 0) return [];
+  return packLanes(monthDaysArr[0], monthDaysArr[monthDaysArr.length - 1], events);
 }
 
-// The patch to pass to updateTaskFields() for "Allocate to <Name>" on a
-// given day: assigns the person and moves the task to start that day,
-// keeping its original duration (a milestone or a task with no due_date
-// keeps due_date null/absent). Backlog tasks with neither date yet default
-// to a 1-day placement.
+// ---------------------------------------------------------------------
+// Workload — see the file header for the disclosed "count of overlapping
+// tasks" simplification (no capacity/hours data exists to measure against).
+// ---------------------------------------------------------------------
+
+// 0 = free that day, 1 = normal, 2 = busy, 3+ = overloaded. A starting
+// point, not a tuned model.
+export function loadLevel(taskCount: number): 0 | 1 | 2 | 3 {
+  if (taskCount <= 0) return 0;
+  if (taskCount === 1) return 1;
+  if (taskCount === 2) return 2;
+  return 3;
+}
+
+// Per-day overlap count for one person's events across a set of days.
+export function personDayLoads(days: string[], personEvents: CalendarEvent[]): Map<string, number> {
+  const loads = new Map<string, number>();
+  days.forEach((d) => {
+    const count = personEvents.filter((e) => e.start <= d && e.end >= d).length;
+    loads.set(d, count);
+  });
+  return loads;
+}
+
+export interface PersonWorkloadSummary {
+  userId: string;
+  name: string;
+  peakLoad: number; // busiest single day this month
+  overloadedDays: number; // days at loadLevel 3 (3+ overlapping tasks)
+}
+
+// Feeds the "grid" layout's workload summary strip — a compact per-person
+// readout for a manager scanning the whole team at a glance, standing in
+// for the day-by-day detail the "rows" layout shows directly.
+export function monthWorkloadSummary(
+  people: CalendarPerson[],
+  monthDaysArr: string[],
+  events: CalendarEvent[]
+): PersonWorkloadSummary[] {
+  return people.map((p) => {
+    const personEvents = events.filter((e) => e.row.task.assignee_id === p.userId);
+    const loads = personDayLoads(monthDaysArr, personEvents);
+    let peakLoad = 0;
+    let overloadedDays = 0;
+    loads.forEach((count) => {
+      peakLoad = Math.max(peakLoad, count);
+      if (loadLevel(count) === 3) overloadedDays += 1;
+    });
+    return { userId: p.userId, name: p.name, peakLoad, overloadedDays };
+  });
+}
+
+// ---------------------------------------------------------------------
+// Reallocation
+// ---------------------------------------------------------------------
+
+// The patch to pass to updateTaskFields() for allocating a backlog task
+// (or reassigning any task) to a given person on a given day: assigns the
+// person and moves the task to start that day, keeping its original
+// duration. A milestone or a task with no due_date keeps due_date
+// null/absent. A backlog task with neither date yet defaults to a 1-day
+// placement.
 export function allocationPatch(
   task: { start_date: string | null; due_date: string | null; is_milestone: boolean },
   userId: string,
@@ -292,25 +364,5 @@ export function eligibleBacklogTasksFor(params: {
     if (r.statusKey !== "backlog") return false;
     const eligible = eligibleAssignees(members, r.task.team_id, teamMemberIdsByTeam, orgTeamAllocationEnabled, r.task.assignee_id);
     return eligible.some((e) => e.member.userId === userId);
-  });
-}
-
-export function byPersonWeekGrid(weekStartIso: string, people: CalendarPerson[], events: CalendarEvent[]): PersonDayCell[][] {
-  const days = weekDays(weekStartIso);
-  const byUser = new Map<string, CalendarEvent[]>();
-  events.forEach((e) => {
-    const uid = e.row.task.assignee_id;
-    if (!uid) return;
-    if (!byUser.has(uid)) byUser.set(uid, []);
-    byUser.get(uid)!.push(e);
-  });
-
-  return people.map((p) => {
-    const userEvents = byUser.get(p.userId) ?? [];
-    return days.map((date) => ({
-      userId: p.userId,
-      date,
-      events: userEvents.filter((e) => e.start <= date && e.end >= date),
-    }));
   });
 }

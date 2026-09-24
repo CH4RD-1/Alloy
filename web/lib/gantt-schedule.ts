@@ -24,13 +24,25 @@ export interface Resolved {
   due: string;
 }
 
+// UTC-safe date-only math: parse via Date.UTC so the resulting timestamp
+// represents midnight UTC on that calendar date regardless of the host's
+// timezone, manipulate via the getUTC*/setUTC* accessors only, and format
+// back via toISOString() (safe precisely because the Date was built and
+// mutated entirely through UTC methods). Mixing local-time parsing
+// (`new Date(iso + "T00:00:00")`) with UTC-based formatting silently loses
+// a day in any timezone with a positive UTC offset — that was the bug here.
+function parseIsoUtc(iso: string): Date {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
 export function daysBetween(a: string, b: string): number {
-  return Math.round((new Date(b + "T00:00:00").getTime() - new Date(a + "T00:00:00").getTime()) / 86400000);
+  return Math.round((parseIsoUtc(b).getTime() - parseIsoUtc(a).getTime()) / 86400000);
 }
 
 export function addDays(iso: string, n: number): string {
-  const d = new Date(iso + "T00:00:00");
-  d.setDate(d.getDate() + n);
+  const d = parseIsoUtc(iso);
+  d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 }
 

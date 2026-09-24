@@ -74,10 +74,13 @@ export interface DashboardStats {
   awaiting: Task[];
 }
 
+// UTC-safe (see gantt-schedule.ts's addDays for why local-parse +
+// toISOString-format silently loses a day in positive-UTC-offset timezones).
 export function addDaysIso(iso: string, n: number): string {
-  const d = new Date(iso + "T00:00:00");
-  d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + n);
+  return dt.toISOString().slice(0, 10);
 }
 
 export function buildDashboardStats(
