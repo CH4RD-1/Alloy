@@ -106,11 +106,14 @@ export interface Tag {
 }
 
 // One of the org's (potentially many) workflows — see schema.sql's own
-// comment on this table. `type` says which of the 3 object kinds a
+// comment on this table. `type` says which of the 4 object kinds a
 // workflow is meant for; it doesn't attach the workflow to any project by
 // itself (projects.workflow_id/asset_workflow_id do that, chosen per
-// project in the Manage Projects panel's workflow dropdown(s)).
-export type WorkflowType = "task" | "helpdesk" | "asset";
+// project in the Manage Projects panel's workflow dropdown(s)). 'deal' is
+// the odd one out — a Deal (below) carries its own workflow_id directly
+// rather than inheriting one from a project, since deals don't belong to a
+// project at all.
+export type WorkflowType = "task" | "helpdesk" | "asset" | "deal";
 
 export interface Workflow {
   id: string;
@@ -213,6 +216,10 @@ export interface Contact {
   name: string | null;
   email: string | null;
   phone: string | null;
+  // CRM Phase A — nullable, a one-off Portal/email/WhatsApp requester
+  // usually has no known company yet. See schema.sql's own comment on this
+  // column.
+  company_id: string | null;
 }
 
 export interface TicketMessage {
@@ -381,4 +388,41 @@ export interface CustomFieldDef {
   options: string[] | null; // only meaningful for "select"
   position: number;
   created_at: string;
+}
+
+// ----------------------------------------------------------------------------
+// CRM — Companies & Deals (Phase A). See lib/actions.ts's own header comment
+// on getCompaniesData/getDealsData for why these are fetched separately from
+// WorkspaceData/getWorkspaceData rather than folded into it.
+// ----------------------------------------------------------------------------
+
+export interface Company {
+  id: string;
+  org_id: string;
+  name: string;
+  domain: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// A deal's "stage" is a workflow_status on a 'deal'-type workflow — see
+// schema.sql's own comment on this table for why win/loss is derived from
+// that status (is_closed + its stable key, 'won'/'lost') rather than stored
+// as a separate column here. lib/crm-view.ts's dealOutcome() does that
+// derivation.
+export interface Deal {
+  id: string;
+  org_id: string;
+  title: string;
+  company_id: string | null;
+  primary_contact_id: string | null;
+  owner_user_id: string | null;
+  workflow_id: string;
+  status_id: string;
+  value: number | null;
+  currency: string;
+  expected_close_date: string | null;
+  created_at: string;
+  updated_at: string;
 }

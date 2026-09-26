@@ -204,7 +204,11 @@ create table workflows (
   id          uuid primary key default gen_random_uuid(),
   org_id      uuid not null references orgs(id) on delete cascade,
   name        text not null,
-  type        text not null check (type in ('task','helpdesk','asset')),
+  -- 'deal' added for the CRM expansion (Phase A) — a Deal Pipeline workflow
+  -- backing the Deals kanban, same idea as 'asset' backing Asset Allocation.
+  -- See companies/deals' own section below for how a deal's stage maps onto
+  -- workflow_statuses/is_closed exactly like every other workflow type here.
+  type        text not null check (type in ('task','helpdesk','asset','deal')),
   created_at  timestamptz not null default now()
 );
 
@@ -389,6 +393,63 @@ create table assets (
 );
 
 create index on assets (org_id);
+
+
+-- ----------------------------------------------------------------------------
+-- CRM — Companies & Deals (Phase A)
+-- ----------------------------------------------------------------------------
+-- Companies are the "account" side of the CRM expansion — contacts (above)
+-- optionally belong to one, and deals (below) optionally do too. Kept
+-- deliberately small for this first pass: name/domain/notes only, no
+-- billing address or other fields nobody's asked for yet.
+create table companies (
+  id          uuid primary key default gen_random_uuid(),
+  org_id      uuid not null references orgs(id) on delete cascade,
+  name        text not null,
+  domain      text,
+  notes       text,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+
+create index on companies (org_id);
+
+-- A contact optionally belongs to one company — nullable, since a one-off
+-- Portal/email/WhatsApp requester usually has no known company yet.
+alter table contacts add column company_id uuid references companies(id) on delete set null;
+create index on contacts (company_id) where company_id is not null;
+
+-- A deal's "stage" is a workflow_status on a 'deal'-type workflow, exactly
+-- the same pattern Helpdesk tickets and Asset Allocation tasks already use
+-- (see the Workflow engine section above) — so the existing full-screen
+-- workflow editor (rename/recolor/add/remove stages) works for deal
+-- pipelines with zero new editor code. Win/loss is deliberately NOT a
+-- separate stored boolean: a stage's own is_closed flag plus its stable key
+-- ('won'/'lost', seeded below and never exposed to edit — same convention
+-- as every other workflow's key) is enough to derive it, matching how the
+-- rest of this app avoids storing a second source of truth alongside a
+-- workflow status wherever it can (see e.g. the "is_closed instead of
+-- status.key==='done'" fix in the multi-workflow overhaul).
+create table deals (
+  id                  uuid primary key default gen_random_uuid(),
+  org_id              uuid not null references orgs(id) on delete cascade,
+  title               text not null,
+  company_id          uuid references companies(id) on delete set null,
+  primary_contact_id  uuid references contacts(id) on delete set null,
+  owner_user_id       uuid references users(id) on delete set null,
+  workflow_id         uuid not null references workflows(id),
+  status_id           uuid not null references workflow_statuses(id),
+  value               numeric(14,2),
+  currency            text not null default 'USD',
+  expected_close_date date,
+  created_at          timestamptz not null default now(),
+  updated_at          timestamptz not null default now()
+);
+
+create index on deals (org_id);
+create index on deals (status_id);
+create index on deals (company_id) where company_id is not null;
+create index on deals (owner_user_id) where owner_user_id is not null;
 
 
 -- ----------------------------------------------------------------------------
@@ -702,6 +763,12 @@ create trigger tasks_set_updated_at before update on tasks
 create trigger docs_set_updated_at before update on docs
   for each row execute function set_updated_at();
 
+create trigger companies_set_updated_at before update on companies
+  for each row execute function set_updated_at();
+
+create trigger deals_set_updated_at before update on deals
+  for each row execute function set_updated_at();
+
 
 -- ----------------------------------------------------------------------------
 -- Task ID assignment
@@ -899,6 +966,16 @@ create policy contacts_tenant_isolation on contacts
 
 alter table assets enable row level security;
 create policy assets_tenant_isolation on assets
+  using (is_org_member(org_id))
+  with check (is_org_member(org_id));
+
+alter table companies enable row level security;
+create policy companies_tenant_isolation on companies
+  using (is_org_member(org_id))
+  with check (is_org_member(org_id));
+
+alter table deals enable row level security;
+create policy deals_tenant_isolation on deals
   using (is_org_member(org_id))
   with check (is_org_member(org_id));
 

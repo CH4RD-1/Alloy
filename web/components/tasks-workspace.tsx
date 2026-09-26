@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { TaskRow } from "@/lib/list-view";
 import { flattenRows } from "@/lib/list-view";
 import { buildBucketColumns } from "@/lib/buckets-view";
@@ -8,6 +8,8 @@ import type {
   WorkflowStatus,
   WorkflowTransition,
   Workflow,
+  Company,
+  Deal,
   Team,
   Project,
   TaskLink,
@@ -40,6 +42,11 @@ import { DocPanel } from "@/components/doc-panel";
 import { FormTemplatesPanel } from "@/components/form-templates-panel";
 import { AssetsView } from "@/components/assets-view";
 import { AssetPanel } from "@/components/asset-panel";
+import { CompaniesView } from "@/components/companies-view";
+import { CompanyPanel } from "@/components/company-panel";
+import { DealsView } from "@/components/deals-view";
+import { DealPanel } from "@/components/deal-panel";
+import { getCompaniesData, getDealsData } from "@/lib/actions";
 import { DashboardView } from "@/components/dashboard-view";
 import { ProjectsPanel } from "@/components/projects-panel";
 import { TeamsPanel } from "@/components/teams-panel";
@@ -110,8 +117,27 @@ function DashboardIcon() {
     </svg>
   );
 }
+// CRM Phase A — a plain building glyph for Companies, and a handshake-ish
+// two-arrow glyph for Deals, kept in the same small inline style as every
+// other view-tab icon above rather than pulling in an icon library for two
+// glyphs.
+function CompaniesIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="3" width="16" height="18" rx="1" />
+      <path d="M9 8h1M14 8h1M9 12h1M14 12h1M9 16h1M14 16h1" />
+    </svg>
+  );
+}
+function DealsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 2v6M12 16v6M4.9 4.9l4.2 4.2M14.9 14.9l4.2 4.2M2 12h6M16 12h6M4.9 19.1l4.2-4.2M14.9 9.1l4.2-4.2" />
+    </svg>
+  );
+}
 
-type ViewKey = "dashboard" | "list" | "buckets" | "gantt" | "calendar" | "kb" | "assets";
+type ViewKey = "dashboard" | "list" | "buckets" | "gantt" | "calendar" | "kb" | "assets" | "companies" | "deals";
 
 export function TasksWorkspace({
   rows,
@@ -214,6 +240,17 @@ export function TasksWorkspace({
   // .panel-doc's own comment in globals.css for the bug this replaces).
   const [mainPanelWidthPx, setMainPanelWidthPx] = useState(440);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  // CRM Phase A — deliberately NOT part of the server-rendered props this
+  // component otherwise receives (see lib/actions.ts's own comment on
+  // getCompaniesData/getDealsData for why): fetched once here on mount and
+  // held as plain client state, so a Task/Project mutation's
+  // router.refresh() elsewhere in the app never re-triggers this fetch or
+  // touches this state at all.
+  const [companies, setCompanies] = useState<Company[]>([]);
+  const [deals, setDeals] = useState<Deal[]>([]);
+  const [crmLoaded, setCrmLoaded] = useState(false);
+  const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
+  const [selectedDealId, setSelectedDealId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [managingForms, setManagingForms] = useState(false);
   const [managingProjects, setManagingProjects] = useState(false);
@@ -331,6 +368,38 @@ export function TasksWorkspace({
   );
   const bucketColumns = useMemo(() => buildBucketColumns(filteredAllRows, bucketTeams), [filteredAllRows, bucketTeams]);
 
+  // CRM Phase A — the one, one-time fetch of Companies/Deals data. Runs
+  // once on mount (orgId is stable for the life of this component), never
+  // again — in particular, never in response to a Task/Project
+  // router.refresh() elsewhere in the app, which is the whole point (see
+  // lib/actions.ts's own comment on getCompaniesData/getDealsData).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [companiesData, dealsData] = await Promise.all([getCompaniesData(orgId), getDealsData(orgId)]);
+      if (cancelled) return;
+      setCompanies(companiesData);
+      setDeals(dealsData);
+      setCrmLoaded(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [orgId]);
+
+  // Deals don't belong to a project, so they carry their own workflow_id
+  // directly rather than inheriting one via projects.workflow_id — see
+  // schema.sql's own comment on the deals table. workflows/statuses here are
+  // already part of this component's regular server-rendered props (fetched
+  // org-wide, all types, by the existing getWorkspaceData), so finding the
+  // 'deal'-type one and its statuses needs no extra query of its own.
+  const dealWorkflow = workflows.find((w) => w.type === "deal") ?? null;
+  const dealStatuses = useMemo(
+    () => (dealWorkflow ? statuses.filter((s) => s.workflow_id === dealWorkflow.id) : []),
+    [statuses, dealWorkflow]
+  );
+  const dealStatusesById = useMemo(() => new Map(dealStatuses.map((s) => [s.id, s])), [dealStatuses]);
+
   return (
     <div className="app-shell">
       <AppSidebar
@@ -380,6 +449,12 @@ export function TasksWorkspace({
           </button>
           <button type="button" className={`view-tab ${view === "assets" ? "active" : ""}`} onClick={() => setView("assets")}>
             <AssetsIcon /> Assets
+          </button>
+          <button type="button" className={`view-tab ${view === "companies" ? "active" : ""}`} onClick={() => setView("companies")}>
+            <CompaniesIcon /> Companies
+          </button>
+          <button type="button" className={`view-tab ${view === "deals" ? "active" : ""}`} onClick={() => setView("deals")}>
+            <DealsIcon /> Deals
           </button>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -462,6 +537,30 @@ export function TasksWorkspace({
           orgId={orgId}
           search={search}
           onSelectAsset={setSelectedAssetId}
+        />
+      )}
+      {view === "companies" && (
+        <CompaniesView
+          orgId={orgId}
+          companies={companies}
+          setCompanies={setCompanies}
+          loaded={crmLoaded}
+          search={search}
+          onSelectCompany={setSelectedCompanyId}
+        />
+      )}
+      {view === "deals" && (
+        <DealsView
+          orgId={orgId}
+          deals={deals}
+          setDeals={setDeals}
+          companies={companies}
+          members={members}
+          dealStatuses={dealStatuses}
+          dealWorkflowId={dealWorkflow?.id ?? null}
+          loaded={crmLoaded}
+          search={search}
+          onSelectDeal={setSelectedDealId}
         />
       )}
 
@@ -567,6 +666,46 @@ export function TasksWorkspace({
               allRows={allRows}
               orgId={orgId}
               onClose={() => setSelectedAssetId(null)}
+            />
+          );
+        })()}
+
+      {selectedCompanyId &&
+        (() => {
+          const company = companies.find((c) => c.id === selectedCompanyId);
+          if (!company) return null;
+          return (
+            <CompanyPanel
+              company={company}
+              deals={deals}
+              dealStatusesById={dealStatusesById}
+              onCompanyChange={setCompanies}
+              onSelectDeal={(dealId) => {
+                setSelectedCompanyId(null);
+                setSelectedDealId(dealId);
+              }}
+              onClose={() => setSelectedCompanyId(null)}
+            />
+          );
+        })()}
+
+      {selectedDealId &&
+        (() => {
+          const deal = deals.find((d) => d.id === selectedDealId);
+          if (!deal) return null;
+          return (
+            <DealPanel
+              deal={deal}
+              companies={companies}
+              members={members}
+              dealStatuses={dealStatuses}
+              dealStatusesById={dealStatusesById}
+              onDealChange={setDeals}
+              onSelectCompany={(companyId) => {
+                setSelectedDealId(null);
+                setSelectedCompanyId(companyId);
+              }}
+              onClose={() => setSelectedDealId(null)}
             />
           );
         })()}

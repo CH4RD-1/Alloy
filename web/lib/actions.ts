@@ -6,7 +6,7 @@ import { revalidatePath } from "next/cache";
 import { autoArrangeCompute, cascadeSchedule, clampToDescendants, applyParentContainment, type ScheduleTask, type Resolved } from "@/lib/gantt-schedule";
 import { TASK_ATTACHMENTS_BUCKET, TASK_ATTACHMENT_MAX_BYTES, taskAttachmentPath, ticketMessageAttachmentPath, sanitizeFilename } from "@/lib/storage";
 import { replyToAddressForTask } from "@/lib/channel-verify";
-import type { FormField, FormFieldType, Role, OrgTemplate, TicketChannel, WorkflowType, DevTools } from "@/lib/types";
+import type { FormField, FormFieldType, Role, OrgTemplate, TicketChannel, WorkflowType, DevTools, Company, Deal, Contact } from "@/lib/types";
 
 // The three role levels the prototype's own "Workflow & roles" panel ever
 // exposed (its ROLES constant: standard/authorizer/manager). "owner" and
@@ -2778,6 +2778,32 @@ export async function completeSignup(input: { orgName: string; template: OrgTemp
   ]);
   if (assetTransitionError) throw new Error(assetTransitionError.message);
 
+  // Deal Pipeline (CRM Phase A) — same seeded-defaults shape as the crm_
+  // phase_a.sql patch's own backfill loop for pre-existing orgs, so a brand-
+  // new signup and an already-migrated org end up with an identical starting
+  // pipeline. No transitions inserted: unlike task/helpdesk workflows, a
+  // deal's stage move (updateDealStage in this file) isn't gated by
+  // workflow_transitions at all yet — every stage is reachable from every
+  // other one on the kanban board, matching how Buckets' own drag-to-
+  // reassign has no transition gate either.
+  const { data: dealWorkflow, error: dealWorkflowError } = await supabase
+    .from("workflows")
+    .insert({ org_id: orgId, name: "Deal Pipeline", type: "deal" })
+    .select("id")
+    .single();
+  if (dealWorkflowError) throw new Error(dealWorkflowError.message);
+  const dealWorkflowId = dealWorkflow.id as string;
+
+  const { error: dealStatusError } = await supabase.from("workflow_statuses").insert([
+    { org_id: orgId, workflow_id: dealWorkflowId, key: "lead", label: "Lead", color: "#94a3b8", position: 0, is_closed: false },
+    { org_id: orgId, workflow_id: dealWorkflowId, key: "qualified", label: "Qualified", color: "#60a5fa", position: 1, is_closed: false },
+    { org_id: orgId, workflow_id: dealWorkflowId, key: "proposal", label: "Proposal", color: "#f59e0b", position: 2, is_closed: false },
+    { org_id: orgId, workflow_id: dealWorkflowId, key: "negotiation", label: "Negotiation", color: "#fb923c", position: 3, is_closed: false },
+    { org_id: orgId, workflow_id: dealWorkflowId, key: "won", label: "Won", color: "#22c55e", position: 4, is_closed: true },
+    { org_id: orgId, workflow_id: dealWorkflowId, key: "lost", label: "Lost", color: "#ef4444", position: 5, is_closed: true },
+  ]);
+  if (dealStatusError) throw new Error(dealStatusError.message);
+
   const starter = TEMPLATE_STARTERS[input.template] ?? TEMPLATE_STARTERS.core;
   const { data: project, error: projectError } = await supabase
     .from("projects")
@@ -3373,4 +3399,175 @@ export async function importProjectTemplate(
 
   revalidatePath("/dashboard");
   return projectId;
+}
+
+/* ============================================================================
+   CRM — Companies & Deals (Phase A)
+   ============================================================================
+   Deliberately NOT wired through getWorkspaceData/lib/tasks-data.ts, and
+   none of the functions below call revalidatePath("/dashboard") the way
+   almost every other action in this file does. That's on purpose, not an
+   oversight: every existing mutation's revalidatePath("/dashboard") + the
+   client's router.refresh() reruns getWorkspaceData's ~18-query full-org
+   fetch on every single edit (see the round-4 dev-log entry, "performance
+   question answered", for the full root-cause) — bolting Companies/Deals
+   onto that same path would mean dragging one Deal card re-fetches every
+   task/doc/asset in the org too, at exactly the moment CRM data volume
+   (contacts/deals) is likely to start actually growing.
+
+   Instead: getCompaniesData/getDealsData below are plain scoped reads,
+   called directly from components/companies-view.tsx and
+   components/deals-view.tsx via a client-side useEffect on mount (see
+   TasksWorkspace's own companies/deals state) — never re-triggered by a
+   Task/Project mutation elsewhere in the app. Every write below returns the
+   affected row (or nothing, for a simple field patch — mirroring
+   updateAssetFields' own void return) so the calling component updates its
+   own local state directly rather than asking the server to re-render
+   anything. This is the "Step 1" scoped-fetch groundwork from the CRM Phase
+   A plan; the existing Tasks/Projects getWorkspaceData fetch is untouched
+   here and stays its own separate, later pass.
+============================================================================ */
+
+export async function getCompaniesData(orgId: string): Promise<Company[]> {
+  const { supabase } = await requireUser();
+  const { data, error } = await supabase.from("companies").select("*").eq("org_id", orgId).order("name");
+  if (error) throw new Error(error.message);
+  return (data ?? []) as Company[];
+}
+
+export async function createCompany(orgId: string, name?: string): Promise<Company> {
+  const { supabase } = await requireUser();
+  const { data, error } = await supabase
+    .from("companies")
+    .insert({ org_id: orgId, name: name?.trim() || "Untitled company" })
+    .select("*")
+    .single();
+  if (error) throw new Error(error.message);
+  return data as Company;
+}
+
+export async function updateCompanyFields(
+  companyId: string,
+  patch: Partial<{ name: string; domain: string | null; notes: string | null }>
+): Promise<void> {
+  const { supabase } = await requireUser();
+  const { error } = await supabase.from("companies").update(patch).eq("id", companyId);
+  if (error) throw new Error(error.message);
+}
+
+export async function deleteCompany(companyId: string): Promise<void> {
+  const { supabase } = await requireUser();
+  const { count: dealCount } = await supabase.from("deals").select("id", { count: "exact", head: true }).eq("company_id", companyId);
+  if (dealCount && dealCount > 0) throw new Error("This company has deals linked to it — unlink or delete those first.");
+  const { count: contactCount } = await supabase.from("contacts").select("id", { count: "exact", head: true }).eq("company_id", companyId);
+  if (contactCount && contactCount > 0) throw new Error("This company has contacts linked to it — unlink those first.");
+  const { error } = await supabase.from("companies").delete().eq("id", companyId);
+  if (error) throw new Error(error.message);
+}
+
+// Contacts linked to one company — backs CompanyPanel's linked-contacts
+// list. A separate scoped read rather than folded into getCompaniesData,
+// since most callers of the Companies list don't need every company's
+// contacts loaded up front.
+export async function getContactsForCompany(companyId: string): Promise<Contact[]> {
+  const { supabase } = await requireUser();
+  const { data, error } = await supabase.from("contacts").select("*").eq("company_id", companyId).order("name");
+  if (error) throw new Error(error.message);
+  return (data ?? []) as Contact[];
+}
+
+// Every contact in the org — backs CompanyPanel's "link an existing
+// contact" picker (there's no standalone Contacts management UI yet; see
+// the CRM Phase A plan's Phase C for that). Unpaginated for now, like
+// getCompaniesData below — fine at today's scale, same disclosed limit as
+// that function.
+export async function getOrgContactsData(orgId: string): Promise<Contact[]> {
+  const { supabase } = await requireUser();
+  const { data, error } = await supabase.from("contacts").select("*").eq("org_id", orgId).order("name");
+  if (error) throw new Error(error.message);
+  return (data ?? []) as Contact[];
+}
+
+export async function setContactCompany(contactId: string, companyId: string | null): Promise<void> {
+  const { supabase } = await requireUser();
+  const { error } = await supabase.from("contacts").update({ company_id: companyId }).eq("id", contactId);
+  if (error) throw new Error(error.message);
+}
+
+export async function getDealsData(orgId: string): Promise<Deal[]> {
+  const { supabase } = await requireUser();
+  const { data, error } = await supabase.from("deals").select("*").eq("org_id", orgId).order("created_at", { ascending: false });
+  if (error) throw new Error(error.message);
+  return (data ?? []) as Deal[];
+}
+
+export async function createDeal(
+  orgId: string,
+  input: {
+    title: string;
+    workflowId: string;
+    statusId: string;
+    companyId?: string | null;
+    primaryContactId?: string | null;
+    ownerUserId?: string | null;
+    value?: number | null;
+    currency?: string;
+    expectedCloseDate?: string | null;
+  }
+): Promise<Deal> {
+  const { supabase } = await requireUser();
+  const { data, error } = await supabase
+    .from("deals")
+    .insert({
+      org_id: orgId,
+      title: input.title.trim() || "Untitled deal",
+      workflow_id: input.workflowId,
+      status_id: input.statusId,
+      company_id: input.companyId ?? null,
+      primary_contact_id: input.primaryContactId ?? null,
+      owner_user_id: input.ownerUserId ?? null,
+      value: input.value ?? null,
+      currency: input.currency ?? "USD",
+      expected_close_date: input.expectedCloseDate ?? null,
+    })
+    .select("*")
+    .single();
+  if (error) throw new Error(error.message);
+  return data as Deal;
+}
+
+export async function updateDealFields(
+  dealId: string,
+  patch: Partial<{
+    title: string;
+    company_id: string | null;
+    primary_contact_id: string | null;
+    owner_user_id: string | null;
+    value: number | null;
+    currency: string;
+    expected_close_date: string | null;
+  }>
+): Promise<void> {
+  const { supabase } = await requireUser();
+  const { error } = await supabase.from("deals").update(patch).eq("id", dealId);
+  if (error) throw new Error(error.message);
+}
+
+// The kanban's own drag-to-move — kept as its own narrower function rather
+// than folded into updateDealFields above, mirroring how updateTaskStatus
+// is separate from updateTaskFields: a stage move is the one Deal edit
+// that's most likely to grow its own side-effects later (an activity log
+// entry, a "deal won -> convert to project" automation — see the CRM plan's
+// Phase E), so it gets one clear call site to attach that to instead of a
+// call-site hunt across every place a deal's status_id gets patched.
+export async function updateDealStage(dealId: string, statusId: string): Promise<void> {
+  const { supabase } = await requireUser();
+  const { error } = await supabase.from("deals").update({ status_id: statusId }).eq("id", dealId);
+  if (error) throw new Error(error.message);
+}
+
+export async function deleteDeal(dealId: string): Promise<void> {
+  const { supabase } = await requireUser();
+  const { error } = await supabase.from("deals").delete().eq("id", dealId);
+  if (error) throw new Error(error.message);
 }

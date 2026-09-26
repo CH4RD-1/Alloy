@@ -30,14 +30,15 @@ const WORKFLOW_ROLES: { id: Role; name: string; blurb: string }[] = [
 ];
 const ROLE_NAME: Record<string, string> = Object.fromEntries(WORKFLOW_ROLES.map((r) => [r.id, r.name]));
 
-// The 3 object kinds a workflow can be built for — see schema.sql's own
+// The 4 object kinds a workflow can be built for — see schema.sql's own
 // comment on workflows.type and the Workflow type in lib/types.ts.
 const WORKFLOW_TYPE_META: Record<WorkflowType, { label: string; blurb: string }> = {
   task: { label: "Regular Tasks", blurb: "The default workflow for ordinary, schedulable work." },
   helpdesk: { label: "Helpdesk Tickets", blurb: "For Helpdesk-flagged projects — no dates, hidden from the Gantt." },
   asset: { label: "Assets", blurb: "For asset-allocation tasks, created from the Assets tab." },
+  deal: { label: "Deal Pipeline", blurb: "For the Deals kanban — a deal's stage is one of this workflow's statuses." },
 };
-const WORKFLOW_TYPES: WorkflowType[] = ["task", "helpdesk", "asset"];
+const WORKFLOW_TYPES: WorkflowType[] = ["task", "helpdesk", "asset", "deal"];
 
 const NEW_STATUS_COLORS = ["#64748b", "#3b82f6", "#f59e0b", "#a855f7", "#22c55e", "#ef4444", "#0ea5e9", "#ec4899"];
 
@@ -175,7 +176,7 @@ export function WorkflowPanel({
   const statusById = new Map(workflowStatuses.map((s) => [s.id, s]));
   const statusLabel = (id: string) => statusById.get(id)?.label ?? "Unknown";
 
-  const groupedWorkflows: Record<WorkflowType, Workflow[]> = { task: [], helpdesk: [], asset: [] };
+  const groupedWorkflows: Record<WorkflowType, Workflow[]> = { task: [], helpdesk: [], asset: [], deal: [] };
   workflows.forEach((w) => groupedWorkflows[w.type]?.push(w));
 
   const [newWorkflowName, setNewWorkflowName] = useState("");
