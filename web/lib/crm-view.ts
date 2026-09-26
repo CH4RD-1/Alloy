@@ -12,9 +12,9 @@ import type { Contact, Deal, WorkflowStatus } from "./types";
 // number. A real multi-currency total (Phase D reporting) will need either
 // a stored exchange rate or an external rates API — not attempted here.
 export const CURRENCIES: { code: string; symbol: string }[] = [
+  { code: "GBP", symbol: "£" },
   { code: "USD", symbol: "$" },
   { code: "EUR", symbol: "€" },
-  { code: "GBP", symbol: "£" },
   { code: "JPY", symbol: "¥" },
   { code: "AUD", symbol: "A$" },
   { code: "CAD", symbol: "C$" },

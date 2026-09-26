@@ -1,6 +1,7 @@
 "use server";
 
 import { createClient, createServiceRoleClient } from "@/lib/supabase/server";
+import { addDurationToDate } from "@/lib/date-only";
 import crypto from "crypto";
 import { revalidatePath } from "next/cache";
 import { autoArrangeCompute, cascadeSchedule, clampToDescendants, applyParentContainment, type ScheduleTask, type Resolved } from "@/lib/gantt-schedule";
@@ -26,6 +27,7 @@ import type {
   CreateTaskActionConfig,
   TransitionLinkedTasksActionConfig,
   UpdateLinkedTasksActionConfig,
+  UpdateLinkedDealActionConfig,
 } from "@/lib/types";
 
 // The three role levels the prototype's own "Workflow & roles" panel ever
@@ -152,10 +154,14 @@ async function assignDisplayId(
   return { task_number: (data as any).task_number ?? null, display_id: (data as any).display_id ?? null };
 }
 
-export async function updateTaskStatus(taskId: string, toStatusId: string, actingAsUserId?: string | null) {
+export async function updateTaskStatus(
+  taskId: string,
+  toStatusId: string,
+  actingAsUserId?: string | null
+): Promise<{ affectedDeals: boolean }> {
   const { supabase, user } = await requireUser();
 
-  const { data: task } = await supabase.from("tasks").select("id, org_id, status_id").eq("id", taskId).single();
+  const { data: task } = await supabase.from("tasks").select("id, org_id, status_id, title, deal_id").eq("id", taskId).single();
   if (!task) throw new Error("Task not found.");
 
   // "View as" (components/dev-tools-panel.tsx) lets an owner/admin preview
@@ -234,6 +240,23 @@ export async function updateTaskStatus(taskId: string, toStatusId: string, actin
     actorUserId,
   });
   revalidatePath("/dashboard");
+
+  // Automations Phase 2 — the Task/Helpdesk/Asset-workflow half of the same
+  // engine updateDealStage's own Deal-workflow move already runs (see
+  // runTransitionActions' own comment). affectedDeals tells the caller
+  // whether to re-fetch the Deals tab's own client-side state (see
+  // TasksWorkspace's companies/deals comment on why that's not part of the
+  // ordinary router.refresh() this function's other callers already get for
+  // free via revalidatePath above).
+  const { affectedDeals } = await runTransitionActions(supabase, {
+    orgId: task.org_id,
+    workflowId: transition.workflow_id as string,
+    fromStatusId: task.status_id,
+    toStatusId,
+    actorUserId,
+    trigger: { kind: "task", taskId, taskTitle: task.title as string, taskDealId: task.deal_id as string | null },
+  });
+  return { affectedDeals };
 }
 
 export async function updateTaskFields(
@@ -2544,6 +2567,7 @@ export async function upsertWorkflowTransition(
     allowed_roles: Role[];
     require_subtasks_complete: boolean;
     require_checklists_complete: boolean;
+    automations_enabled?: boolean;
   }
 ) {
   const { supabase } = await requireUser();
@@ -2563,6 +2587,12 @@ export async function upsertWorkflowTransition(
       allowed_roles: input.allowed_roles,
       require_subtasks_complete: input.require_subtasks_complete,
       require_checklists_complete: input.require_checklists_complete,
+      // Omitted (a brand-new transition made via the "Add / update a
+      // transition" form or a flow-chart drag) defaults to the column's own
+      // `false` — deliberately not auto-enabled just because someone attaches
+      // an action next; see workflow-panel.tsx's addAction/TransitionAutomations
+      // for why enabling it is its own explicit step.
+      ...(input.automations_enabled !== undefined ? { automations_enabled: input.automations_enabled } : {}),
     },
     { onConflict: "org_id,from_status_id,to_status_id" }
   );
@@ -3539,27 +3569,46 @@ export async function importProjectTemplate(
 // than failing the whole move). Returns whether anything on the Tasks side
 // changed, so the caller knows whether it needs a full router.refresh() —
 // see updateDealStage's own comment on why that's still the fallback here.
-async function runDealStageActions(
+//
+// The trigger that fired a transition is either the Deal itself (a Deal-
+// workflow move) or a Task (a Task/Helpdesk/Asset-workflow move) — see
+// TransitionActionType's own comment in lib/types.ts for which action types
+// are offered for which. Kept as a discriminated union rather than two
+// separate functions since every action type below needs the same
+// transition lookup/automations_enabled gate/actions fetch first, and
+// create_task's own logic (due date, assignee) is identical either way once
+// it has an "effective linked deal" to read from.
+type AutomationTrigger =
+  | { kind: "deal"; dealId: string; dealTitle: string; dealExpectedCloseDate: string | null; dealOwnerUserId: string | null; dealStatusId: string }
+  | { kind: "task"; taskId: string; taskTitle: string; taskDealId: string | null };
+
+function resolveActionTitle(template: string, trigger: AutomationTrigger): string {
+  const dealTitle = trigger.kind === "deal" ? trigger.dealTitle : "";
+  const taskTitle = trigger.kind === "task" ? trigger.taskTitle : "";
+  const resolved = (template || "{{deal}}").trim().replace(/\{\{\s*deal\s*\}\}/g, dealTitle).replace(/\{\{\s*task\s*\}\}/g, taskTitle);
+  return resolved || dealTitle || taskTitle || "Untitled";
+}
+
+async function runTransitionActions(
   supabase: Awaited<ReturnType<typeof createClient>>,
   input: {
     orgId: string;
-    dealId: string;
-    dealTitle: string;
     workflowId: string;
     fromStatusId: string;
     toStatusId: string;
     actorUserId: string;
+    trigger: AutomationTrigger;
   }
-): Promise<{ affectedTasks: boolean }> {
+): Promise<{ affectedTasks: boolean; affectedDeals: boolean }> {
   const { data: transition } = await supabase
     .from("workflow_transitions")
-    .select("id")
+    .select("id, automations_enabled")
     .eq("org_id", input.orgId)
     .eq("workflow_id", input.workflowId)
     .eq("from_status_id", input.fromStatusId)
     .eq("to_status_id", input.toStatusId)
     .maybeSingle();
-  if (!transition) return { affectedTasks: false };
+  if (!transition || !transition.automations_enabled) return { affectedTasks: false, affectedDeals: false };
 
   const { data: rawActions } = await supabase
     .from("workflow_transition_actions")
@@ -3567,16 +3616,50 @@ async function runDealStageActions(
     .eq("transition_id", transition.id)
     .order("position");
   const actions = (rawActions ?? []) as WorkflowTransitionAction[];
-  if (actions.length === 0) return { affectedTasks: false };
+  if (actions.length === 0) return { affectedTasks: false, affectedDeals: false };
+
+  const { trigger } = input;
+
+  // The deal a create_task action's due-date/assignee options read from, and
+  // the deal an update_linked_deal action moves — the triggering deal itself
+  // for a Deal-workflow move, or the triggering task's own linked deal (if
+  // any) for a Task/Helpdesk/Asset-workflow move. Resolved once up front
+  // (one extra query, only for a task trigger that's actually deal-linked)
+  // rather than per action, since several actions in the same list can need
+  // it.
+  type EffectiveDeal = { id: string; title: string; expected_close_date: string | null; owner_user_id: string | null; status_id: string };
+  let effectiveDeal: EffectiveDeal | null = null;
+  if (trigger.kind === "deal") {
+    effectiveDeal = {
+      id: trigger.dealId,
+      title: trigger.dealTitle,
+      expected_close_date: trigger.dealExpectedCloseDate,
+      owner_user_id: trigger.dealOwnerUserId,
+      status_id: trigger.dealStatusId,
+    };
+  } else if (trigger.taskDealId) {
+    const { data } = await supabase
+      .from("deals")
+      .select("id, title, expected_close_date, owner_user_id, status_id")
+      .eq("id", trigger.taskDealId)
+      .maybeSingle();
+    if (data) effectiveDeal = data as EffectiveDeal;
+  }
 
   let affectedTasks = false;
+  let affectedDeals = false;
 
   for (const action of actions) {
     if (action.action_type === "create_task") {
       const config = action.config as CreateTaskActionConfig;
       if (!config.project_id || !config.workflow_status_id) continue;
       const { task_number, display_id } = await assignDisplayId(supabase, config.project_id);
-      const title = (config.title || "{{deal}}").trim().replace(/\{\{\s*deal\s*\}\}/g, input.dealTitle) || input.dealTitle;
+      const title = resolveActionTitle(config.title, trigger);
+      let dueDate: string | null = null;
+      if (config.due_date_from_deal_close && effectiveDeal?.expected_close_date) {
+        dueDate = addDurationToDate(effectiveDeal.expected_close_date, config.due_date_offset_days ?? 0, "days");
+      }
+      const assigneeId = config.assignee_mode === "deal_owner" ? effectiveDeal?.owner_user_id ?? null : config.assignee_id ?? null;
       const { data: created, error } = await supabase
         .from("tasks")
         .insert({
@@ -3584,8 +3667,9 @@ async function runDealStageActions(
           project_id: config.project_id,
           status_id: config.workflow_status_id,
           title,
-          assignee_id: config.assignee_id ?? null,
-          deal_id: input.dealId,
+          assignee_id: assigneeId,
+          due_date: dueDate,
+          deal_id: trigger.kind === "deal" ? trigger.dealId : trigger.taskDealId ?? null,
           created_by: input.actorUserId,
           task_number,
           display_id,
@@ -3597,6 +3681,11 @@ async function runDealStageActions(
         affectedTasks = true;
       }
     } else if (action.action_type === "transition_linked_tasks") {
+      // Deal-workflow triggers only — see TransitionActionType's own
+      // comment. The workflow-panel editor never offers this action type on
+      // a Task/Helpdesk/Asset workflow, but guard server-side too rather
+      // than trusting the client.
+      if (trigger.kind !== "deal") continue;
       const config = action.config as TransitionLinkedTasksActionConfig;
       if (!config.workflow_status_id) continue;
       const { data: targetStatus } = await supabase
@@ -3606,7 +3695,7 @@ async function runDealStageActions(
         .maybeSingle();
       if (!targetStatus) continue;
 
-      const { data: linkedTasks } = await supabase.from("tasks").select("id, project_id").eq("deal_id", input.dealId);
+      const { data: linkedTasks } = await supabase.from("tasks").select("id, project_id").eq("deal_id", trigger.dealId);
       if (linkedTasks && linkedTasks.length > 0) {
         // Only tasks whose own project runs the same task workflow that
         // target status belongs to — a linked task on a different task
@@ -3624,16 +3713,38 @@ async function runDealStageActions(
         }
       }
     } else if (action.action_type === "update_linked_tasks") {
+      // Deal-workflow triggers only — same reasoning as transition_linked_tasks above.
+      if (trigger.kind !== "deal") continue;
       const config = action.config as UpdateLinkedTasksActionConfig;
       const patch: Partial<Pick<Task, "assignee_id">> = {};
       if (config.assignee_id !== undefined) patch.assignee_id = config.assignee_id;
       if (Object.keys(patch).length === 0) continue;
-      const { error } = await supabase.from("tasks").update(patch).eq("deal_id", input.dealId);
+      const { error } = await supabase.from("tasks").update(patch).eq("deal_id", trigger.dealId);
       if (!error) affectedTasks = true;
+    } else if (action.action_type === "update_linked_deal") {
+      // Task/Helpdesk/Asset-workflow triggers only — the reverse direction.
+      // A no-op (not an error) when the triggering task has no linked deal,
+      // matching this app's existing convention for an unmet automation
+      // precondition (e.g. create_task's own due-date/assignee options above).
+      if (trigger.kind !== "task" || !effectiveDeal) continue;
+      const config = action.config as UpdateLinkedDealActionConfig;
+      if (!config.workflow_status_id || config.workflow_status_id === effectiveDeal.status_id) continue;
+      const { error } = await supabase.from("deals").update({ status_id: config.workflow_status_id }).eq("id", effectiveDeal.id);
+      if (!error) {
+        await logDealActivity(supabase, {
+          orgId: input.orgId,
+          dealId: effectiveDeal.id,
+          type: "stage",
+          fromStatusId: effectiveDeal.status_id,
+          toStatusId: config.workflow_status_id,
+          actorUserId: input.actorUserId,
+        });
+        affectedDeals = true;
+      }
     }
   }
 
-  return { affectedTasks };
+  return { affectedTasks, affectedDeals };
 }
 
 export async function getCompaniesData(orgId: string): Promise<Company[]> {
@@ -3776,7 +3887,7 @@ export async function createDeal(
       primary_contact_id: input.primaryContactId ?? null,
       owner_user_id: input.ownerUserId ?? null,
       value: input.value ?? null,
-      currency: input.currency ?? "USD",
+      currency: input.currency ?? "GBP",
       expected_close_date: input.expectedCloseDate ?? null,
     })
     .select("*")
@@ -3822,7 +3933,7 @@ export async function updateDealStage(dealId: string, statusId: string): Promise
   const { supabase, user } = await requireUser();
   const { data: deal } = await supabase
     .from("deals")
-    .select("id, org_id, title, workflow_id, status_id")
+    .select("id, org_id, title, workflow_id, status_id, expected_close_date, owner_user_id")
     .eq("id", dealId)
     .maybeSingle();
   if (!deal) throw new Error("Deal not found.");
@@ -3842,15 +3953,22 @@ export async function updateDealStage(dealId: string, statusId: string): Promise
     actorUserId: user.id,
   });
 
-  return runDealStageActions(supabase, {
+  const { affectedTasks } = await runTransitionActions(supabase, {
     orgId: deal.org_id as string,
-    dealId,
-    dealTitle: deal.title as string,
     workflowId: deal.workflow_id as string,
     fromStatusId,
     toStatusId: statusId,
     actorUserId: user.id,
+    trigger: {
+      kind: "deal",
+      dealId,
+      dealTitle: deal.title as string,
+      dealExpectedCloseDate: deal.expected_close_date as string | null,
+      dealOwnerUserId: deal.owner_user_id as string | null,
+      dealStatusId: fromStatusId,
+    },
   });
+  return { affectedTasks };
 }
 
 export async function deleteDeal(dealId: string): Promise<void> {

@@ -11,6 +11,7 @@ import type {
   CreateTaskActionConfig,
   TransitionLinkedTasksActionConfig,
   UpdateLinkedTasksActionConfig,
+  UpdateLinkedDealActionConfig,
   WorkflowType,
   Role,
   Invite,
@@ -100,6 +101,7 @@ interface EdgeMenuState {
   allowedRoles: Set<Role>;
   requireSubtasks: boolean;
   requireChecklists: boolean;
+  automationsEnabled: boolean;
   x: number;
   y: number;
 }
@@ -180,6 +182,7 @@ function WorkflowFlowChart({
       allowedRoles: new Set(t.allowed_roles as Role[]),
       requireSubtasks: t.require_subtasks_complete,
       requireChecklists: t.require_checklists_complete,
+      automationsEnabled: t.automations_enabled,
       x: clientX,
       y: clientY,
     });
@@ -265,7 +268,7 @@ function WorkflowFlowChart({
 
   function saveEdgeMenu() {
     if (!edgeMenu) return;
-    const { fromStatusId, toStatusId, allowedRoles, requireSubtasks, requireChecklists } = edgeMenu;
+    const { fromStatusId, toStatusId, allowedRoles, requireSubtasks, requireChecklists, automationsEnabled } = edgeMenu;
     setEdgeMenu(null);
     run(() =>
       upsertWorkflowTransition(orgId, {
@@ -274,6 +277,7 @@ function WorkflowFlowChart({
         allowed_roles: Array.from(allowedRoles),
         require_subtasks_complete: requireSubtasks,
         require_checklists_complete: requireChecklists,
+        automations_enabled: automationsEnabled,
       })
     );
   }
@@ -386,6 +390,15 @@ function WorkflowFlowChart({
             Require checklists complete
           </label>
           <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
+          <label className="checkbox-row" style={{ padding: "2px 6px" }}>
+            <input
+              type="checkbox"
+              checked={edgeMenu.automationsEnabled}
+              onChange={(e) => setEdgeMenu((prev) => (prev ? { ...prev, automationsEnabled: e.target.checked } : prev))}
+            />{" "}
+            Enable automations for this move
+          </label>
+          <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
           <button type="button" className="obj-menu-item" disabled={pending || edgeMenu.allowedRoles.size === 0} onClick={saveEdgeMenu}>
             Save
           </button>
@@ -402,41 +415,76 @@ const ACTION_TYPE_META: Record<TransitionActionType, string> = {
   create_task: "Create a new task",
   transition_linked_tasks: "Move linked tasks",
   update_linked_tasks: "Reassign linked tasks",
+  update_linked_deal: "Move the linked deal",
 };
+
+// transition_linked_tasks/update_linked_tasks act on "every task linked to
+// the triggering deal" — meaningless when the trigger is already a task (see
+// TransitionActionType's own comment) — so those two are only offered on a
+// 'deal' workflow's transitions; update_linked_deal is their mirror image,
+// only offered everywhere else.
+function actionTypesFor(workflowType: WorkflowType): TransitionActionType[] {
+  return workflowType === "deal"
+    ? ["create_task", "transition_linked_tasks", "update_linked_tasks"]
+    : ["create_task", "update_linked_deal"];
+}
 
 // One-line, human summary of an existing action — the delete-and-re-add
 // list doesn't need a full re-render of the add form to explain itself.
-function describeAction(action: WorkflowTransitionAction, statusById: Map<string, WorkflowStatus>, projectById: Map<string, Project>, memberNameById: Map<string, string>): string {
+function describeAction(
+  action: WorkflowTransitionAction,
+  statusById: Map<string, WorkflowStatus>,
+  projectById: Map<string, Project>,
+  memberNameById: Map<string, string>,
+  dealStatusById: Map<string, WorkflowStatus>
+): string {
   if (action.action_type === "create_task") {
     const config = action.config as CreateTaskActionConfig;
     const project = projectById.get(config.project_id)?.name ?? "an unknown project";
     const status = statusById.get(config.workflow_status_id)?.label ?? "an unknown status";
-    const assignee = config.assignee_id ? memberNameById.get(config.assignee_id) ?? "an unknown teammate" : null;
-    return `New task "${config.title || "{{deal}}"}" in ${project}, at ${status}${assignee ? `, assigned to ${assignee}` : ""}`;
+    const assignee =
+      config.assignee_mode === "deal_owner"
+        ? "the linked deal's owner"
+        : config.assignee_id
+        ? memberNameById.get(config.assignee_id) ?? "an unknown teammate"
+        : null;
+    const dueDate = config.due_date_from_deal_close
+      ? `, due ${config.due_date_offset_days ? `${Math.abs(config.due_date_offset_days)} day${Math.abs(config.due_date_offset_days) === 1 ? "" : "s"} ${config.due_date_offset_days < 0 ? "before" : "after"} ` : "on "}the linked deal's expected close date`
+      : "";
+    return `New task "${config.title || "{{deal}}"}" in ${project}, at ${status}${assignee ? `, assigned to ${assignee}` : ""}${dueDate}`;
   }
   if (action.action_type === "transition_linked_tasks") {
     const config = action.config as TransitionLinkedTasksActionConfig;
     const status = statusById.get(config.workflow_status_id)?.label ?? "an unknown status";
     return `Move every linked task to ${status}`;
   }
+  if (action.action_type === "update_linked_deal") {
+    const config = action.config as UpdateLinkedDealActionConfig;
+    const status = dealStatusById.get(config.workflow_status_id)?.label ?? "an unknown stage";
+    return `Move the task's linked deal to ${status} (does nothing if it isn't linked to one)`;
+  }
   const config = action.config as UpdateLinkedTasksActionConfig;
   const assignee = config.assignee_id ? memberNameById.get(config.assignee_id) ?? "an unknown teammate" : null;
   return assignee ? `Reassign every linked task to ${assignee}` : "Reassign linked tasks (nothing configured yet)";
 }
 
-// Attached to one transition on a 'deal' workflow — what else happens on
-// this exact stage move (see schema.sql's own comment on
-// workflow_transition_actions, and updateDealStage/runDealStageActions in
-// lib/actions.ts for where these actually run). v1 only executes these for
-// deal-workflow transitions acting on tasks, so this editor only renders
-// when the selected workflow's type is 'deal' — see its call site below.
+// Attached to one transition — what else happens on this exact move (see
+// schema.sql's own comment on workflow_transition_actions, and
+// updateDealStage/updateTaskStatus's shared runTransitionActions() in
+// lib/actions.ts for where these actually run). Available on every workflow
+// type; which action types are offered depends on whether the trigger is a
+// deal or a task (see actionTypesFor above) — its call site below only
+// renders this at all once the transition's own automations_enabled switch
+// is on.
 function TransitionAutomations({
   orgId,
   transitionId,
   actions,
+  workflowType,
   statuses,
   projects,
   taskWorkflows,
+  dealStatuses,
   members,
   pending,
   run,
@@ -444,9 +492,11 @@ function TransitionAutomations({
   orgId: string;
   transitionId: string;
   actions: WorkflowTransitionAction[];
+  workflowType: WorkflowType;
   statuses: WorkflowStatus[];
   projects: Project[];
   taskWorkflows: Workflow[];
+  dealStatuses: WorkflowStatus[];
   members: MemberSummary[];
   pending: boolean;
   run: (action: () => Promise<unknown>) => void;
@@ -454,14 +504,21 @@ function TransitionAutomations({
   const statusById = new Map(statuses.map((s) => [s.id, s]));
   const projectById = new Map(projects.map((p) => [p.id, p]));
   const memberNameById = new Map(members.map((m) => [m.userId, m.name]));
+  const dealStatusById = new Map(dealStatuses.map((s) => [s.id, s]));
+  const availableTypes = actionTypesFor(workflowType);
 
-  const [actionType, setActionType] = useState<TransitionActionType>("create_task");
+  const [actionType, setActionType] = useState<TransitionActionType>(availableTypes[0]);
+  const effectiveActionType = availableTypes.includes(actionType) ? actionType : availableTypes[0];
   const [title, setTitle] = useState("");
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
   const [taskStatusId, setTaskStatusId] = useState("");
+  const [assigneeMode, setAssigneeMode] = useState<"fixed" | "deal_owner">("fixed");
   const [assigneeId, setAssigneeId] = useState("");
+  const [dueFromDealClose, setDueFromDealClose] = useState(false);
+  const [dueOffsetDays, setDueOffsetDays] = useState("0");
   const [moveWorkflowId, setMoveWorkflowId] = useState(taskWorkflows[0]?.id ?? "");
   const [moveStatusId, setMoveStatusId] = useState("");
+  const [dealMoveStatusId, setDealMoveStatusId] = useState(dealStatuses[0]?.id ?? "");
 
   const project = projects.find((p) => p.id === projectId) ?? projects[0];
   const projectStatuses = statuses.filter((s) => s.workflow_id === project?.workflow_id).sort((a, b) => a.position - b.position);
@@ -469,37 +526,58 @@ function TransitionAutomations({
 
   const moveStatuses = statuses.filter((s) => s.workflow_id === moveWorkflowId).sort((a, b) => a.position - b.position);
   const effectiveMoveStatusId = moveStatuses.some((s) => s.id === moveStatusId) ? moveStatusId : moveStatuses[0]?.id ?? "";
+  const effectiveDealMoveStatusId = dealStatuses.some((s) => s.id === dealMoveStatusId) ? dealMoveStatusId : dealStatuses[0]?.id ?? "";
 
   function addAction() {
-    let config: CreateTaskActionConfig | TransitionLinkedTasksActionConfig | UpdateLinkedTasksActionConfig;
-    if (actionType === "create_task") {
+    let config: CreateTaskActionConfig | TransitionLinkedTasksActionConfig | UpdateLinkedTasksActionConfig | UpdateLinkedDealActionConfig;
+    if (effectiveActionType === "create_task") {
       if (!effectiveTaskStatusId || !project) return;
-      config = { title: title.trim(), project_id: project.id, workflow_status_id: effectiveTaskStatusId, assignee_id: assigneeId || null };
-    } else if (actionType === "transition_linked_tasks") {
+      config = {
+        title: title.trim(),
+        project_id: project.id,
+        workflow_status_id: effectiveTaskStatusId,
+        assignee_mode: assigneeMode,
+        assignee_id: assigneeMode === "fixed" ? assigneeId || null : null,
+        due_date_from_deal_close: dueFromDealClose,
+        due_date_offset_days: dueFromDealClose ? Number(dueOffsetDays) || 0 : undefined,
+      };
+    } else if (effectiveActionType === "transition_linked_tasks") {
       if (!effectiveMoveStatusId) return;
       config = { workflow_status_id: effectiveMoveStatusId };
+    } else if (effectiveActionType === "update_linked_deal") {
+      if (!effectiveDealMoveStatusId) return;
+      config = { workflow_status_id: effectiveDealMoveStatusId };
     } else {
       if (!assigneeId) return;
       config = { assignee_id: assigneeId };
     }
-    run(() => createWorkflowTransitionAction(orgId, transitionId, actionType, config));
+    run(() => createWorkflowTransitionAction(orgId, transitionId, effectiveActionType, config));
     setTitle("");
     setAssigneeId("");
+    setAssigneeMode("fixed");
+    setDueFromDealClose(false);
+    setDueOffsetDays("0");
   }
 
   const canAdd =
-    actionType === "create_task" ? !!effectiveTaskStatusId && !!project : actionType === "transition_linked_tasks" ? !!effectiveMoveStatusId : !!assigneeId;
+    effectiveActionType === "create_task"
+      ? !!effectiveTaskStatusId && !!project
+      : effectiveActionType === "transition_linked_tasks"
+      ? !!effectiveMoveStatusId
+      : effectiveActionType === "update_linked_deal"
+      ? !!effectiveDealMoveStatusId
+      : !!assigneeId;
 
   return (
     <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border, #e5e7eb)" }}>
       <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--text-faint)", marginBottom: 6 }}>
-        Automations — what happens to tasks when a deal makes this move
+        Automations — what else happens on this move
       </div>
       {actions.length === 0 && <p style={{ color: "var(--text-faint)", fontSize: 11.5, margin: "0 0 6px" }}>None yet.</p>}
       {actions.map((a) => (
         <div key={a.id} className="crumbline" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
           <span style={{ flex: 1 }}>
-            {ACTION_TYPE_META[a.action_type]}: {describeAction(a, statusById, projectById, memberNameById)}
+            {ACTION_TYPE_META[a.action_type]}: {describeAction(a, statusById, projectById, memberNameById, dealStatusById)}
           </span>
           <button
             className="icon-btn"
@@ -513,8 +591,8 @@ function TransitionAutomations({
       ))}
 
       <div className="field-row" style={{ marginTop: 6, marginBottom: 6 }}>
-        <select className="select-input" style={{ flex: 1 }} value={actionType} onChange={(e) => setActionType(e.target.value as TransitionActionType)}>
-          {(Object.keys(ACTION_TYPE_META) as TransitionActionType[]).map((t) => (
+        <select className="select-input" style={{ flex: 1 }} value={effectiveActionType} onChange={(e) => setActionType(e.target.value as TransitionActionType)}>
+          {availableTypes.map((t) => (
             <option key={t} value={t}>
               {ACTION_TYPE_META[t]}
             </option>
@@ -522,7 +600,7 @@ function TransitionAutomations({
         </select>
       </div>
 
-      {actionType === "create_task" && (
+      {effectiveActionType === "create_task" && (
         <>
           <input
             className="text-input"
@@ -549,18 +627,49 @@ function TransitionAutomations({
               ))}
             </select>
           </div>
-          <select className="select-input" style={{ width: "100%", marginBottom: 6 }} value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)}>
-            <option value="">Unassigned</option>
-            {members.map((m) => (
-              <option key={m.userId} value={m.userId}>
-                {m.name}
-              </option>
-            ))}
-          </select>
+          <div className="field-row" style={{ marginBottom: 6 }}>
+            <select
+              className="select-input"
+              style={{ flex: 1 }}
+              value={assigneeMode}
+              onChange={(e) => setAssigneeMode(e.target.value as "fixed" | "deal_owner")}
+            >
+              <option value="fixed">Assign to…</option>
+              <option value="deal_owner">Assign to the linked deal's owner</option>
+            </select>
+            {assigneeMode === "fixed" && (
+              <select className="select-input" style={{ flex: 1 }} value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)}>
+                <option value="">Unassigned</option>
+                {members.map((m) => (
+                  <option key={m.userId} value={m.userId}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          <label className="checkbox-row" style={{ padding: "2px 0", marginBottom: 6 }}>
+            <input type="checkbox" checked={dueFromDealClose} onChange={(e) => setDueFromDealClose(e.target.checked)} />{" "}
+            Due date follows the linked deal's expected close date
+          </label>
+          {dueFromDealClose && (
+            <div className="field-row" style={{ marginBottom: 6, alignItems: "center" }}>
+              <input
+                type="number"
+                className="text-input"
+                style={{ width: 70 }}
+                value={dueOffsetDays}
+                onChange={(e) => setDueOffsetDays(e.target.value)}
+              />
+              <span style={{ fontSize: 11.5, color: "var(--text-faint)" }}>
+                days offset (negative = before close date, 0 = on it, positive = after)
+              </span>
+            </div>
+          )}
         </>
       )}
 
-      {actionType === "transition_linked_tasks" && (
+      {effectiveActionType === "transition_linked_tasks" && (
         <div className="field-row" style={{ marginBottom: 6 }}>
           <select
             className="select-input"
@@ -589,12 +698,28 @@ function TransitionAutomations({
         </div>
       )}
 
-      {actionType === "update_linked_tasks" && (
+      {effectiveActionType === "update_linked_tasks" && (
         <select className="select-input" style={{ width: "100%", marginBottom: 6 }} value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)}>
           <option value="">Pick a teammate…</option>
           {members.map((m) => (
             <option key={m.userId} value={m.userId}>
               {m.name}
+            </option>
+          ))}
+        </select>
+      )}
+
+      {effectiveActionType === "update_linked_deal" && (
+        <select
+          className="select-input"
+          style={{ width: "100%", marginBottom: 6 }}
+          value={effectiveDealMoveStatusId}
+          onChange={(e) => setDealMoveStatusId(e.target.value)}
+        >
+          {dealStatuses.length === 0 && <option value="">No deal stages yet</option>}
+          {dealStatuses.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.label}
             </option>
           ))}
         </select>
@@ -672,10 +797,20 @@ export function WorkflowPanel({
   );
   const statusById = new Map(workflowStatuses.map((s) => [s.id, s]));
   const statusLabel = (id: string) => statusById.get(id)?.label ?? "Unknown";
-  // Automations only run for 'deal' workflows today (see runDealStageActions
-  // in lib/actions.ts) — the editor below only renders for those, so this is
-  // only ever read in that branch, but it's cheap enough to just compute.
+  // Feeds the "Move linked tasks"/"Reassign linked tasks" actions' own
+  // target-status pickers (Deal-workflow automations only — see
+  // TransitionAutomations' own comment).
   const taskWorkflows = useMemo(() => workflows.filter((w) => w.type === "task" || w.type === "helpdesk"), [workflows]);
+  // Feeds the reverse case: a Task/Helpdesk/Asset-workflow automation's
+  // "update_linked_deal" action needs a deal-workflow status to move the
+  // linked deal to. An org has at most one 'deal'-type workflow (created
+  // once by CRM Phase A's own DB patch/completeSignup), so this is just that
+  // workflow's own statuses.
+  const dealWorkflow = useMemo(() => workflows.find((w) => w.type === "deal"), [workflows]);
+  const dealStatuses = useMemo(
+    () => statuses.filter((s) => s.workflow_id === dealWorkflow?.id).sort((a, b) => a.position - b.position),
+    [statuses, dealWorkflow]
+  );
 
   const groupedWorkflows: Record<WorkflowType, Workflow[]> = { task: [], helpdesk: [], asset: [], deal: [] };
   workflows.forEach((w) => groupedWorkflows[w.type]?.push(w));
@@ -724,6 +859,7 @@ export function WorkflowPanel({
   const [wfRoles, setWfRoles] = useState<Set<Role>>(new Set(WORKFLOW_ROLES.map((r) => r.id)));
   const [wfSubtasks, setWfSubtasks] = useState(false);
   const [wfChecklists, setWfChecklists] = useState(false);
+  const [wfAutomations, setWfAutomations] = useState(false);
 
   function toggleWfRole(id: Role) {
     setWfRoles((prev) => {
@@ -748,11 +884,13 @@ export function WorkflowPanel({
         allowed_roles: Array.from(wfRoles),
         require_subtasks_complete: wfSubtasks,
         require_checklists_complete: wfChecklists,
+        automations_enabled: wfAutomations,
       })
     );
     setWfRoles(new Set(WORKFLOW_ROLES.map((r) => r.id)));
     setWfSubtasks(false);
     setWfChecklists(false);
+    setWfAutomations(false);
   }
 
   const workflowMembers = members.filter((m) => WORKFLOW_ROLES.some((r) => r.id === m.role));
@@ -988,7 +1126,8 @@ export function WorkflowPanel({
                           <p style={{ color: "var(--text-faint)", fontSize: 12 }}>
                             A deal can move to any stage regardless of what&apos;s defined here — &quot;Allowed for&quot; and the two
                             require-complete checks below don&apos;t apply to deals yet, only to Regular Tasks/Helpdesk/Assets. Define
-                            a transition here anyway to attach an automation to that exact move (below each one).
+                            a transition here anyway to attach an automation to that exact move, and switch on &quot;Enable
+                            automations for this move&quot; below to reveal it.
                           </p>
                         ) : (
                           workflowTransitions.length === 0 && (
@@ -1028,14 +1167,16 @@ export function WorkflowPanel({
                                 </>
                               )}
                             </div>
-                            {selectedWorkflow.type === "deal" && (
+                            {t.automations_enabled && (
                               <TransitionAutomations
                                 orgId={orgId}
                                 transitionId={t.id}
                                 actions={transitionActions.filter((a) => a.transition_id === t.id).sort((a, b) => a.position - b.position)}
+                                workflowType={selectedWorkflow.type}
                                 statuses={statuses}
                                 projects={projects}
                                 taskWorkflows={taskWorkflows}
+                                dealStatuses={dealStatuses}
                                 members={members}
                                 pending={pending}
                                 run={run}
@@ -1078,6 +1219,10 @@ export function WorkflowPanel({
                           <label className="checkbox-row">
                             <input type="checkbox" checked={wfChecklists} onChange={(e) => setWfChecklists(e.target.checked)} /> Require all
                             checklists complete
+                          </label>
+                          <label className="checkbox-row">
+                            <input type="checkbox" checked={wfAutomations} onChange={(e) => setWfAutomations(e.target.checked)} /> Enable
+                            automations for this move
                           </label>
                         </div>
                         {effectiveFrom && effectiveFrom === effectiveTo && (

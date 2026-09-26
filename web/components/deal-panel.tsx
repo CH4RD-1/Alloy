@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { Deal, Company, Contact, WorkflowStatus, DealActivityLogEntry } from "@/lib/types";
+import type { Deal, Company, Contact, WorkflowStatus, WorkflowTransition, DealActivityLogEntry } from "@/lib/types";
 import type { MemberSummary } from "@/lib/tasks-data";
 import { updateDealFields, updateDealStage, deleteDeal, getOrgContactsData, getDealActivityLog } from "@/lib/actions";
 import { CURRENCIES, contactLabel, dealOutcome } from "@/lib/crm-view";
@@ -65,6 +65,14 @@ export function DealPanel({
   members,
   dealStatuses,
   dealStatusesById,
+  // Deal-workflow transitions only (see workflow-panel.tsx's own comment on
+  // an org having at most one 'deal'-type workflow) — feeds the move-to-row
+  // buttons below, mirroring task-panel.tsx's own "→ Label" buttons. Unlike
+  // tasks, a deal was never restricted to configured transitions (see
+  // updateDealStage — any status is a legal move via drag or the Stage
+  // select below), so this is additive: buttons show up for whichever moves
+  // an org has bothered to define, the select always covers every stage.
+  transitions,
   onDealChange,
   onSelectCompany,
   onSelectContact,
@@ -75,6 +83,7 @@ export function DealPanel({
   members: MemberSummary[];
   dealStatuses: WorkflowStatus[];
   dealStatusesById: Map<string, WorkflowStatus>;
+  transitions: WorkflowTransition[];
   onDealChange: (updater: (prev: Deal[]) => Deal[]) => void;
   onSelectCompany: (id: string) => void;
   onSelectContact: (id: string) => void;
@@ -122,10 +131,28 @@ export function DealPanel({
       .finally(() => setPending(false));
   }
 
+  // Shared by both the move-to-row buttons below and the Stage select's own
+  // onChange — same optimistic patch + updateDealStage call + activity-log
+  // refresh either way, just a different trigger for picking the target
+  // status.
+  function moveTo(statusId: string) {
+    if (statusId === deal.status_id) return;
+    patchLocal({ status_id: statusId });
+    // See deals-view.tsx's own comment on handleDrop — a configured
+    // transition automation can touch tasks, which still needs a full
+    // refresh to show up.
+    run(async () => {
+      const { affectedTasks } = await updateDealStage(deal.id, statusId);
+      if (affectedTasks) router.refresh();
+      getDealActivityLog(deal.id).then(setActivity);
+    });
+  }
+
   const outcome = dealOutcome(deal, dealStatusesById);
   const orderedStatuses = [...dealStatuses].sort((a, b) => a.position - b.position);
   const company = deal.company_id ? companies.find((c) => c.id === deal.company_id) : undefined;
   const contactsForCompany = deal.company_id ? contacts.filter((c) => c.company_id === deal.company_id) : contacts;
+  const outgoing = transitions.filter((t) => t.from_status_id === deal.status_id);
 
   return (
     <>
@@ -141,13 +168,24 @@ export function DealPanel({
           {error && <div className="banner" style={{ color: "var(--blocked)", background: "var(--blocked-bg)" }}>{error}</div>}
 
           <div className="field-group">
-            <span
-              className="chip status-chip"
-              style={{ color: dealStatusesById.get(deal.status_id)?.color, background: "var(--surface-2, #f1f1f1)" }}
-            >
-              {dealStatusesById.get(deal.status_id)?.label ?? "Unknown stage"}
-              {outcome !== "open" && ` · ${outcome}`}
-            </span>
+            <div className="status-current">
+              <span
+                className="chip status-chip"
+                style={{ color: dealStatusesById.get(deal.status_id)?.color, background: "var(--surface-2, #f1f1f1)" }}
+              >
+                {dealStatusesById.get(deal.status_id)?.label ?? "Unknown stage"}
+                {outcome !== "open" && ` · ${outcome}`}
+              </span>
+            </div>
+            {outgoing.length > 0 && (
+              <div className="move-to-row">
+                {outgoing.map((t) => (
+                  <button key={t.id} className="move-btn" disabled={pending} onClick={() => moveTo(t.to_status_id)}>
+                    → {dealStatusesById.get(t.to_status_id)?.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="field-group">
@@ -167,22 +205,7 @@ export function DealPanel({
 
           <div className="field-group">
             <label className="field-label">Stage</label>
-            <select
-              className="select-input"
-              value={deal.status_id}
-              onChange={(e) => {
-                const statusId = e.target.value;
-                patchLocal({ status_id: statusId });
-                // See deals-view.tsx's own comment on handleDrop — a
-                // configured transition automation can touch tasks, which
-                // still needs a full refresh to show up.
-                run(async () => {
-                  const { affectedTasks } = await updateDealStage(deal.id, statusId);
-                  if (affectedTasks) router.refresh();
-                  getDealActivityLog(deal.id).then(setActivity);
-                });
-              }}
-            >
+            <select className="select-input" value={deal.status_id} onChange={(e) => moveTo(e.target.value)}>
               {orderedStatuses.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.label}

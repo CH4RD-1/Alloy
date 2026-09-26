@@ -239,6 +239,12 @@ create table workflow_transitions (
   allowed_roles                  text[] not null default '{manager,authorizer,standard}',
   require_subtasks_complete      boolean not null default false,
   require_checklists_complete    boolean not null default false,
+  -- Per-transition switch for the Automations editor below (workflow_transition_actions)
+  -- — off by default so a simple workflow's transition list stays uncluttered, and so an
+  -- org can pause a transition's configured actions without deleting them. Backfilled to
+  -- true for any transition that already had actions configured before this column existed
+  -- (see automations_phase2.sql) so existing deal automations kept working unattended.
+  automations_enabled            boolean not null default false,
   created_at                     timestamptz not null default now(),
   unique (org_id, from_status_id, to_status_id)
 );
@@ -250,25 +256,49 @@ create index on workflow_transitions (workflow_id);
 -- as its own table (rather than a column on workflow_transitions) so a
 -- single transition can carry any number of actions, run in `position`
 -- order. Nothing here gates the move itself (that's still
--- allowed_roles/require_*_complete above); an action fires only after the
--- move already went through. v1 only wires these up for 'deal'-type
--- workflows acting on tasks (see updateDealStage in lib/actions.ts) — a
--- transition on a 'task' workflow can have actions rows too, but nothing
--- executes them yet. `config`'s shape depends on action_type (see the
--- TransitionActionConfig union in lib/types.ts for the exact fields):
---   create_task              — makes one new task, linked to the deal via
---                               tasks.deal_id below
---   transition_linked_tasks  — moves every task already linked to the deal
---                               into a target status (skipping any whose
---                               project runs a different task workflow than
---                               that status belongs to — see that function's
---                               own comment)
---   update_linked_tasks      — reassigns every task linked to the deal
+-- allowed_roles/require_*_complete above, plus workflow_transitions'
+-- automations_enabled switch above deciding whether this table is even
+-- consulted); an action fires only after the move already went through.
+-- Originally 'deal'-workflow-only (see updateDealStage in lib/actions.ts);
+-- now wired up for every workflow type via the same generic
+-- runTransitionActions() runner, called from updateDealStage for a Deal
+-- move and updateTaskStatus for a Task/Helpdesk/Asset move. `config`'s shape
+-- depends on action_type (see the TransitionActionConfig union in
+-- lib/types.ts for the exact fields):
+--   create_task              — makes one new task. Offered on every
+--                               workflow type. tasks.deal_id on the new row
+--                               is set to the triggering deal (a Deal-type
+--                               trigger) or carried over from the
+--                               triggering task's own deal_id (a Task/
+--                               Helpdesk/Asset-type trigger, so a follow-up
+--                               task stays linked to the same deal, if any).
+--                               Its config can also set the new task's due
+--                               date from that same linked deal's
+--                               expected_close_date (optionally offset by a
+--                               number of days) and/or assign it to that
+--                               deal's owner instead of a fixed person.
+--   transition_linked_tasks  — Deal-workflow only: moves every task already
+--                               linked to the deal (tasks.deal_id) into a
+--                               target status (skipping any whose project
+--                               runs a different task workflow than that
+--                               status belongs to — see that function's own
+--                               comment). No natural meaning for a Task/
+--                               Helpdesk/Asset trigger (the trigger already
+--                               is a task), so the editor only offers this
+--                               action type on a 'deal' workflow.
+--   update_linked_tasks      — Deal-workflow only, same scoping as above:
+--                               reassigns every task linked to the deal.
+--   update_linked_deal       — Task/Helpdesk/Asset-workflow only, the
+--                               reverse direction of the two above: moves
+--                               the triggering task's own linked deal
+--                               (tasks.deal_id) to a target deal-workflow
+--                               status. A no-op if the triggering task isn't
+--                               linked to a deal.
 create table workflow_transition_actions (
   id             uuid primary key default gen_random_uuid(),
   org_id         uuid not null references orgs(id) on delete cascade,
   transition_id  uuid not null references workflow_transitions(id) on delete cascade,
-  action_type    text not null check (action_type in ('create_task', 'transition_linked_tasks', 'update_linked_tasks')),
+  action_type    text not null check (action_type in ('create_task', 'transition_linked_tasks', 'update_linked_tasks', 'update_linked_deal')),
   config         jsonb not null default '{}',
   position       int not null default 0,
   created_at     timestamptz not null default now()
@@ -473,7 +503,7 @@ create table deals (
   workflow_id         uuid not null references workflows(id),
   status_id           uuid not null references workflow_statuses(id),
   value               numeric(14,2),
-  currency            text not null default 'USD',
+  currency            text not null default 'GBP',
   expected_close_date date,
   created_at          timestamptz not null default now(),
   updated_at          timestamptz not null default now()

@@ -173,6 +173,7 @@ export function TaskPanel({
   onWidthChange,
   onClose,
   onPatchTasks,
+  onDealAutomation,
 }: {
   taskId: string;
   allRows: TaskRow[]; // flattened: every task, top-level and sub (see flattenRows)
@@ -233,6 +234,17 @@ export function TaskPanel({
   // round-trip, so the rest of the app already agrees with what this panel
   // shows the moment you make the change.
   onPatchTasks: (patches: Record<string, TaskPatch>) => void;
+  // Called after a status move whose updateTaskStatus response reports
+  // affectedDeals — i.e. a Workflow automation's "update_linked_deal"
+  // action actually moved this task's linked deal (see lib/actions.ts's
+  // runTransitionActions). CRM data is fetched once on mount and never
+  // refreshed by router.refresh() (see tasks-workspace.tsx's own comment),
+  // so without this the Deals tab and any open DealPanel would silently
+  // disagree with what just happened until the next full reload. Omit to
+  // skip the refresh (fine anywhere this task's own workflow can't have a
+  // deal-moving automation attached, though there's no real harm in always
+  // passing it).
+  onDealAutomation?: () => void;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -288,6 +300,7 @@ export function TaskPanel({
         orgId={orgId}
         onOpenAsset={onOpenAsset}
         onClose={onClose}
+        onDealAutomation={onDealAutomation}
       />
     );
   }
@@ -440,7 +453,15 @@ export function TaskPanel({
                       className="move-btn"
                       disabled={!allowed || pending}
                       title={allowed ? undefined : "Your role can't make this move"}
-                      onClick={() => run(() => updateTaskStatus(taskId, t.to_status_id, actingAsUserId), statusPatch(t.to_status_id))}
+                      onClick={() =>
+                        run(
+                          () =>
+                            updateTaskStatus(taskId, t.to_status_id, actingAsUserId).then(({ affectedDeals }) => {
+                              if (affectedDeals) onDealAutomation?.();
+                            }),
+                          statusPatch(t.to_status_id)
+                        )
+                      }
                     >
                       → {toStatus?.label}
                     </button>
@@ -877,6 +898,7 @@ function AssetAllocationPanel({
   orgId,
   onOpenAsset,
   onClose,
+  onDealAutomation,
 }: {
   task: Task;
   allRows: TaskRow[];
@@ -886,6 +908,7 @@ function AssetAllocationPanel({
   orgId: string;
   onOpenAsset: (assetId: string) => void;
   onClose: () => void;
+  onDealAutomation?: () => void;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -1034,7 +1057,14 @@ function AssetAllocationPanel({
             style={{ width: "100%", padding: 9 }}
             disabled={pending || !doneStatus || !!(doneStatus && task.status_id === doneStatus.id)}
             title={doneStatus ? "" : "This allocation's workflow has no closed status configured"}
-            onClick={() => doneStatus && run(() => updateTaskStatus(task.id, doneStatus.id))}
+            onClick={() =>
+              doneStatus &&
+              run(() =>
+                updateTaskStatus(task.id, doneStatus.id).then(({ affectedDeals }) => {
+                  if (affectedDeals) onDealAutomation?.();
+                })
+              )
+            }
           >
             {doneStatus && task.status_id === doneStatus.id ? "Asset returned" : "Mark asset returned"}
           </button>

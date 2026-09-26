@@ -131,27 +131,53 @@ export interface WorkflowTransition {
   allowed_roles: string[];
   require_subtasks_complete: boolean;
   require_checklists_complete: boolean;
+  // Automations Phase 2 — per-transition switch for the Automations editor;
+  // see schema.sql's own comment on this column.
+  automations_enabled: boolean;
 }
 
 // Cross-entity automation — see schema.sql's own comment on
-// workflow_transition_actions for the full rationale. v1 only wires these up
-// for 'deal'-type workflows acting on tasks (updateDealStage in
-// lib/actions.ts); the table/types are generic so a 'task' workflow could
-// carry actions too, but nothing executes them yet.
-export type TransitionActionType = "create_task" | "transition_linked_tasks" | "update_linked_tasks";
+// workflow_transition_actions for the full rationale. Originally 'deal'-only
+// (updateDealStage in lib/actions.ts); now runs for every workflow type via
+// the generic runTransitionActions(), called from both updateDealStage (a
+// Deal move) and updateTaskStatus (a Task/Helpdesk/Asset move).
+// transition_linked_tasks/update_linked_tasks stay Deal-only (no natural
+// meaning when the trigger is already a task); update_linked_deal is the
+// Task/Helpdesk/Asset-only reverse direction.
+export type TransitionActionType = "create_task" | "transition_linked_tasks" | "update_linked_tasks" | "update_linked_deal";
 
 // Makes one new task in `project_id`, at `workflow_status_id` (must belong
-// to that project's own task/helpdesk workflow), linked to the triggering
-// deal via tasks.deal_id. `title` may contain the literal token "{{deal}}",
-// replaced with the deal's own title when the action runs (see
-// resolveActionTitle in lib/actions.ts) — the only templating this supports.
+// to that project's own task/helpdesk workflow). `title` may contain the
+// literal tokens "{{deal}}" and "{{task}}", replaced with the triggering
+// deal's/task's own title when the action runs (see resolveActionTitle in
+// lib/actions.ts) — the only templating this supports; whichever one didn't
+// trigger this action resolves to "".
+//
+// tasks.deal_id on the new row is set to the triggering deal (a Deal-type
+// trigger) or carried over from the triggering task's own deal_id (a Task/
+// Helpdesk/Asset-type trigger) — see runTransitionActions' own comment for
+// the "effective linked deal" concept the two fields below both key off:
+//   due_date_from_deal_close  — set the new task's due_date from that linked
+//                                deal's expected_close_date, offset by
+//                                due_date_offset_days (e.g. -3 for "3 days
+//                                before"). A no-op if there's no linked deal
+//                                or it has no expected_close_date.
+//   assignee_mode             — 'deal_owner' assigns the new task to that
+//                                linked deal's owner_user_id instead of the
+//                                fixed assignee_id below (also a no-op absent
+//                                a linked deal/owner). Omitted or 'fixed'
+//                                keeps today's plain assignee_id behavior.
 export interface CreateTaskActionConfig {
   title: string;
   project_id: string;
   workflow_status_id: string;
   assignee_id?: string | null;
+  assignee_mode?: "fixed" | "deal_owner";
+  due_date_from_deal_close?: boolean;
+  due_date_offset_days?: number;
 }
 
+// Deal-workflow triggers only (see TransitionActionType's own comment).
 // Moves every task already linked to the triggering deal (tasks.deal_id)
 // into `workflow_status_id` — but only the ones whose own project runs the
 // same task workflow that status belongs to; a linked task on a different
@@ -161,16 +187,27 @@ export interface TransitionLinkedTasksActionConfig {
   workflow_status_id: string;
 }
 
-// Reassigns every task linked to the triggering deal. Both fields optional
-// so an action can set just one; a fully-empty config is a no-op.
+// Deal-workflow triggers only. Reassigns every task linked to the triggering
+// deal. Both fields optional so an action can set just one; a fully-empty
+// config is a no-op.
 export interface UpdateLinkedTasksActionConfig {
   assignee_id?: string | null;
+}
+
+// Task/Helpdesk/Asset-workflow triggers only — the reverse direction of
+// transition_linked_tasks/update_linked_tasks above: moves the triggering
+// task's own linked deal (tasks.deal_id) to a deal-workflow status.
+// `workflow_status_id` must belong to the org's 'deal'-type workflow. A
+// no-op if the triggering task isn't linked to a deal.
+export interface UpdateLinkedDealActionConfig {
+  workflow_status_id: string;
 }
 
 export type TransitionActionConfig =
   | CreateTaskActionConfig
   | TransitionLinkedTasksActionConfig
-  | UpdateLinkedTasksActionConfig;
+  | UpdateLinkedTasksActionConfig
+  | UpdateLinkedDealActionConfig;
 
 export interface WorkflowTransitionAction {
   id: string;

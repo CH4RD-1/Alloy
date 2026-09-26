@@ -498,6 +498,22 @@ export function TasksWorkspace({
     [statuses, dealWorkflow]
   );
   const dealStatusesById = useMemo(() => new Map(dealStatuses.map((s) => [s.id, s])), [dealStatuses]);
+  // Feeds DealPanel's own move-to-row buttons (mirrors TaskPanel's) — see
+  // that panel's own comment on its `transitions` prop.
+  const dealTransitions = useMemo(
+    () => (dealWorkflow ? transitions.filter((t) => t.workflow_id === dealWorkflow.id) : []),
+    [transitions, dealWorkflow]
+  );
+
+  // A Task/Helpdesk/Asset transition's own "update_linked_deal" automation
+  // (see lib/actions.ts's runTransitionActions) can move a deal that this
+  // component fetched once on mount and never refreshes on its own (see the
+  // CRM fetch effect above) — router.refresh() alone wouldn't pick that up,
+  // so TaskPanel calls this after any status change reports affectedDeals,
+  // and it just re-runs that same one-time fetch for Deals only.
+  const refreshDeals = useCallback(() => {
+    getDealsData(orgId).then(setDeals);
+  }, [orgId]);
 
   return (
     <div className="app-shell">
@@ -737,6 +753,7 @@ export function TasksWorkspace({
           onWidthChange={setMainPanelWidthPx}
           onClose={() => setSelectedTaskId(null)}
           onPatchTasks={patchTasks}
+          onDealAutomation={refreshDeals}
         />
       )}
 
@@ -837,6 +854,7 @@ export function TasksWorkspace({
               members={members}
               dealStatuses={dealStatuses}
               dealStatusesById={dealStatusesById}
+              transitions={dealTransitions}
               onDealChange={setDeals}
               onSelectCompany={(companyId) => {
                 setSelectedDealId(null);
