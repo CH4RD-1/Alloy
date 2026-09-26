@@ -292,12 +292,19 @@ function WorkflowFlowChart({
   return (
     <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface-2)", padding: 8 }}>
       <p style={{ color: "var(--text-faint)", fontSize: 11.5, margin: "0 0 6px" }}>
-        Drag from a state&apos;s edge to another state to add a transition; click an existing arrow to edit or remove it.
+        Drag from a state&apos;s edge to another state to add a transition; click an existing arrow to edit or remove it.{" "}
+        <span style={{ color: "#3b82f6" }}>Blue</span> arrows have automations enabled.
       </p>
       <svg ref={svgRef} width={Math.max(width, 300)} height={height} style={{ display: "block" }}>
         <defs>
           <marker id="wf-flow-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)" />
+          </marker>
+          {/* Same arrowhead, in the same blue as an automations_enabled
+              edge's own stroke below — so a glance at the diagram shows
+              which moves carry an automation without opening each one. */}
+          <marker id="wf-flow-arrow-automation" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#3b82f6" />
           </marker>
         </defs>
         {transitions.map((t) => {
@@ -312,7 +319,14 @@ function WorkflowFlowChart({
           const path = `M ${x1} ${edgeY} C ${x1} ${curveY}, ${x2} ${curveY}, ${x2} ${edgeY}`;
           return (
             <g key={t.id}>
-              <path d={path} fill="none" stroke="var(--text-faint)" strokeWidth={1.5} opacity={0.75} markerEnd="url(#wf-flow-arrow)" />
+              <path
+                d={path}
+                fill="none"
+                stroke={t.automations_enabled ? "#3b82f6" : "var(--text-faint)"}
+                strokeWidth={t.automations_enabled ? 2 : 1.5}
+                opacity={t.automations_enabled ? 0.9 : 0.75}
+                markerEnd={t.automations_enabled ? "url(#wf-flow-arrow-automation)" : "url(#wf-flow-arrow)"}
+              />
               {/* Invisible wide-stroke overlay, same trick as
                   gantt-view.tsx's own .gantt-link-hit — the visible curve
                   above is too thin to click reliably. */}
@@ -1167,6 +1181,35 @@ export function WorkflowPanel({
                                 </>
                               )}
                             </div>
+                            {/* A persistent, always-visible toggle right on the
+                                card — the flow chart's own edge-menu popover has
+                                the same checkbox, but it's a transient overlay
+                                with no lasting on/off indicator once it closes
+                                (see this card's own blue-when-enabled edge on
+                                the flow chart above for the other half of that
+                                same "make the state visible" fix). Writes the
+                                same fields the edge menu/add-transition form
+                                would, just for this one flag. */}
+                            <label className="checkbox-row" style={{ marginTop: 6 }}>
+                              <input
+                                type="checkbox"
+                                checked={t.automations_enabled}
+                                disabled={pending}
+                                onChange={(e) =>
+                                  run(() =>
+                                    upsertWorkflowTransition(orgId, {
+                                      from_status_id: t.from_status_id,
+                                      to_status_id: t.to_status_id,
+                                      allowed_roles: t.allowed_roles as Role[],
+                                      require_subtasks_complete: t.require_subtasks_complete,
+                                      require_checklists_complete: t.require_checklists_complete,
+                                      automations_enabled: e.target.checked,
+                                    })
+                                  )
+                                }
+                              />{" "}
+                              Enable automations for this move
+                            </label>
                             {t.automations_enabled && (
                               <TransitionAutomations
                                 orgId={orgId}
