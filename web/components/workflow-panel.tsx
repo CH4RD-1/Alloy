@@ -131,12 +131,19 @@ function WorkflowFlowChart({
   transitions,
   pending,
   run,
+  onOptimisticPatch,
 }: {
   orgId: string;
   statuses: WorkflowStatus[];
   transitions: WorkflowTransition[];
   pending: boolean;
   run: (action: () => Promise<unknown>) => void;
+  // Paints a transition's edited fields onto WorkflowPanel's own patch
+  // overlay immediately, before the round-trip that actually persists them
+  // — see that overlay's own comment for why (router.refresh() re-running
+  // the whole org-wide fetch is genuinely slow, and this is one of the
+  // interactions where waiting on it read as "nothing happened").
+  onOptimisticPatch: (transitionId: string, patch: Partial<WorkflowTransition>) => void;
 }) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [edgeMenu, setEdgeMenu] = useState<EdgeMenuState | null>(null);
@@ -268,8 +275,14 @@ function WorkflowFlowChart({
 
   function saveEdgeMenu() {
     if (!edgeMenu) return;
-    const { fromStatusId, toStatusId, allowedRoles, requireSubtasks, requireChecklists, automationsEnabled } = edgeMenu;
+    const { transitionId, fromStatusId, toStatusId, allowedRoles, requireSubtasks, requireChecklists, automationsEnabled } = edgeMenu;
     setEdgeMenu(null);
+    onOptimisticPatch(transitionId, {
+      allowed_roles: Array.from(allowedRoles),
+      require_subtasks_complete: requireSubtasks,
+      require_checklists_complete: requireChecklists,
+      automations_enabled: automationsEnabled,
+    });
     run(() =>
       upsertWorkflowTransition(orgId, {
         from_status_id: fromStatusId,
@@ -800,14 +813,35 @@ export function WorkflowPanel({
     });
   }
 
+  // Optimistic patch overlay for transition edits (allowed roles, the two
+  // require-complete checks, automations_enabled) — same idea as
+  // lib/task-patches.ts's own overlay for tasks, just simpler (a flat array,
+  // no tree). router.refresh() above re-runs the whole org-wide server fetch
+  // on every save, which the roadmap doc's own "performance question
+  // answered" entry already flags as genuinely slow — this doesn't fix
+  // that, it just paints the edit's own known-good result immediately so
+  // toggling a checkbox (or saving the edge-menu popover) doesn't read as
+  // "nothing happened" while the slow part is still in flight. Cleared as
+  // soon as `transitions` itself changes reference, which is exactly when
+  // the real, refreshed data has landed and the patch is no longer needed.
+  const [transitionPatches, setTransitionPatches] = useState<Record<string, Partial<WorkflowTransition>>>({});
+  useEffect(() => setTransitionPatches({}), [transitions]);
+  const patchedTransitions = useMemo(
+    () => (Object.keys(transitionPatches).length === 0 ? transitions : transitions.map((t) => (transitionPatches[t.id] ? { ...t, ...transitionPatches[t.id] } : t))),
+    [transitions, transitionPatches]
+  );
+  function patchTransition(transitionId: string, patch: Partial<WorkflowTransition>) {
+    setTransitionPatches((prev) => ({ ...prev, [transitionId]: { ...prev[transitionId], ...patch } }));
+  }
+
   const selectedWorkflow = workflows.find((w) => w.id === selectedWorkflowId) ?? workflows[0] ?? null;
   const workflowStatuses = useMemo(
     () => statuses.filter((s) => s.workflow_id === selectedWorkflow?.id).sort((a, b) => a.position - b.position),
     [statuses, selectedWorkflow]
   );
   const workflowTransitions = useMemo(
-    () => transitions.filter((t) => t.workflow_id === selectedWorkflow?.id),
-    [transitions, selectedWorkflow]
+    () => patchedTransitions.filter((t) => t.workflow_id === selectedWorkflow?.id),
+    [patchedTransitions, selectedWorkflow]
   );
   const statusById = new Map(workflowStatuses.map((s) => [s.id, s]));
   const statusLabel = (id: string) => statusById.get(id)?.label ?? "Unknown";
@@ -891,6 +925,19 @@ export function WorkflowPanel({
   // choices sitting there to be silently reused for the next pair.
   function addTransition() {
     if (!effectiveFrom || !effectiveTo || effectiveFrom === effectiveTo) return;
+    // Optimistic patch only when this is really an edit of an already-
+    // existing transition — a brand-new one has no id yet to patch (the
+    // server generates it), so that case just waits on the real refresh
+    // like every other create-a-new-row action already does.
+    const existing = workflowTransitions.find((t) => t.from_status_id === effectiveFrom && t.to_status_id === effectiveTo);
+    if (existing) {
+      patchTransition(existing.id, {
+        allowed_roles: Array.from(wfRoles),
+        require_subtasks_complete: wfSubtasks,
+        require_checklists_complete: wfChecklists,
+        automations_enabled: wfAutomations,
+      });
+    }
     run(() =>
       upsertWorkflowTransition(orgId, {
         from_status_id: effectiveFrom,
@@ -1051,7 +1098,14 @@ export function WorkflowPanel({
 
                     <div className="field-group">
                       <span className="field-label">Flow chart</span>
-                      <WorkflowFlowChart orgId={orgId} statuses={workflowStatuses} transitions={workflowTransitions} pending={pending} run={run} />
+                      <WorkflowFlowChart
+                        orgId={orgId}
+                        statuses={workflowStatuses}
+                        transitions={workflowTransitions}
+                        pending={pending}
+                        run={run}
+                        onOptimisticPatch={patchTransition}
+                      />
                     </div>
 
                     <div className="wf-editor-columns">
@@ -1195,7 +1249,8 @@ export function WorkflowPanel({
                                 type="checkbox"
                                 checked={t.automations_enabled}
                                 disabled={pending}
-                                onChange={(e) =>
+                                onChange={(e) => {
+                                  patchTransition(t.id, { automations_enabled: e.target.checked });
                                   run(() =>
                                     upsertWorkflowTransition(orgId, {
                                       from_status_id: t.from_status_id,
@@ -1205,8 +1260,8 @@ export function WorkflowPanel({
                                       require_checklists_complete: t.require_checklists_complete,
                                       automations_enabled: e.target.checked,
                                     })
-                                  )
-                                }
+                                  );
+                                }}
                               />{" "}
                               Enable automations for this move
                             </label>
