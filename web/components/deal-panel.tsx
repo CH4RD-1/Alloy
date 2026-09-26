@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import type { Deal, Company, Contact, WorkflowStatus, DealActivityLogEntry } from "@/lib/types";
 import type { MemberSummary } from "@/lib/tasks-data";
 import { updateDealFields, updateDealStage, deleteDeal, getOrgContactsData, getDealActivityLog } from "@/lib/actions";
-import { CURRENCIES, dealOutcome } from "@/lib/crm-view";
+import { CURRENCIES, contactLabel, dealOutcome } from "@/lib/crm-view";
 import { DateGuideField } from "@/components/date-guide-field";
 import { hueFor, initials } from "@/lib/list-view";
 import { dealActivitySummary, timeAgo } from "@/lib/activity-view";
@@ -67,6 +67,7 @@ export function DealPanel({
   dealStatusesById,
   onDealChange,
   onSelectCompany,
+  onSelectContact,
   onClose,
 }: {
   deal: Deal;
@@ -76,6 +77,7 @@ export function DealPanel({
   dealStatusesById: Map<string, WorkflowStatus>;
   onDealChange: (updater: (prev: Deal[]) => Deal[]) => void;
   onSelectCompany: (id: string) => void;
+  onSelectContact: (id: string) => void;
   onClose: () => void;
 }) {
   const router = useRouter();
@@ -228,10 +230,19 @@ export function DealPanel({
               <option value="">No contact</option>
               {contactsForCompany.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.name || c.email || c.phone || "Unnamed contact"}
+                  {contactLabel(c)}
                 </option>
               ))}
             </select>
+            {deal.primary_contact_id && (
+              <button
+                className="crumbline"
+                style={{ marginTop: 4, background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}
+                onClick={() => onSelectContact(deal.primary_contact_id!)}
+              >
+                View contact →
+              </button>
+            )}
           </div>
 
           <div className="field-group">

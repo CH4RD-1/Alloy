@@ -3685,10 +3685,11 @@ export async function getContactsForCompany(companyId: string): Promise<Contact[
 }
 
 // Every contact in the org — backs CompanyPanel's "link an existing
-// contact" picker (there's no standalone Contacts management UI yet; see
-// the CRM Phase A plan's Phase C for that). Unpaginated for now, like
-// getCompaniesData below — fine at today's scale, same disclosed limit as
-// that function.
+// contact" picker and, now that CRM Phase C is built, the standalone
+// Contacts tab's own scoped fetch (see TasksWorkspace's companies/deals
+// state — contacts joins that same fetch-once-on-mount pattern). Unpaginated
+// for now, like getCompaniesData below — fine at today's scale, same
+// disclosed limit as that function.
 export async function getOrgContactsData(orgId: string): Promise<Contact[]> {
   const { supabase } = await requireUser();
   const { data, error } = await supabase.from("contacts").select("*").eq("org_id", orgId).order("name");
@@ -3696,9 +3697,49 @@ export async function getOrgContactsData(orgId: string): Promise<Contact[]> {
   return (data ?? []) as Contact[];
 }
 
+// CRM Phase C — mirrors createCompany/updateCompanyFields/deleteCompany
+// immediately below companies' own equivalents (kept together in this file
+// by entity, not by phase). A contact created from the standalone Contacts
+// tab starts with no company/deal links, same as a company created from
+// CompaniesView.
+export async function createContact(orgId: string, name?: string): Promise<Contact> {
+  const { supabase } = await requireUser();
+  const { data, error } = await supabase
+    .from("contacts")
+    .insert({ org_id: orgId, name: name?.trim() || null })
+    .select("*")
+    .single();
+  if (error) throw new Error(error.message);
+  return data as Contact;
+}
+
+export async function updateContactFields(
+  contactId: string,
+  patch: Partial<{ name: string | null; email: string | null; phone: string | null; company_id: string | null; notes: string | null }>
+): Promise<void> {
+  const { supabase } = await requireUser();
+  const { error } = await supabase.from("contacts").update(patch).eq("id", contactId);
+  if (error) throw new Error(error.message);
+}
+
 export async function setContactCompany(contactId: string, companyId: string | null): Promise<void> {
   const { supabase } = await requireUser();
   const { error } = await supabase.from("contacts").update({ company_id: companyId }).eq("id", contactId);
+  if (error) throw new Error(error.message);
+}
+
+// Guarded the same way deleteCompany guards on linked deals/contacts: a
+// contact that's any deal's primary_contact_id has to be unlinked from that
+// deal (or the deal deleted) before it can go, so deleting a contact never
+// silently nulls out a deal's own record of who it's talking to.
+export async function deleteContact(contactId: string): Promise<void> {
+  const { supabase } = await requireUser();
+  const { count: dealCount } = await supabase
+    .from("deals")
+    .select("id", { count: "exact", head: true })
+    .eq("primary_contact_id", contactId);
+  if (dealCount && dealCount > 0) throw new Error("This contact is linked to one or more deals — unlink those first.");
+  const { error } = await supabase.from("contacts").delete().eq("id", contactId);
   if (error) throw new Error(error.message);
 }
 

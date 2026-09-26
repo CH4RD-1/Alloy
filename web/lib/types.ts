@@ -287,6 +287,10 @@ export interface Contact {
   // usually has no known company yet. See schema.sql's own comment on this
   // column.
   company_id: string | null;
+  // CRM Phase C — added alongside the standalone Contacts tab/panel; see
+  // contacts_phase_c.sql. notes mirrors Company's own notes field.
+  notes: string | null;
+  updated_at: string;
 }
 
 export interface TicketMessage {

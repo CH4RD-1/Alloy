@@ -3,7 +3,7 @@
 // lib/assets-view.ts, so the grouping/derivation logic is easy to test/reuse
 // without a component tree.
 
-import type { Deal, WorkflowStatus } from "./types";
+import type { Contact, Deal, WorkflowStatus } from "./types";
 
 // Display-only for now — no conversion, matching the prototype's own
 // currency selector (see alloy-development-log.md's "Currency selector"
@@ -68,6 +68,15 @@ export function buildDealColumns(deals: Deal[], dealStatuses: WorkflowStatus[]):
     byStatus.set(d.status_id, list);
   });
   return ordered.map((status) => ({ status, deals: byStatus.get(status.id) ?? [] }));
+}
+
+// CRM Phase C — a contact so often has no name (a bare Portal/email/WhatsApp
+// submission) that every place rendering one already inlined this same
+// name-else-email-else-phone-else-placeholder fallback by hand
+// (company-panel.tsx, deal-panel.tsx); pulled out here once the standalone
+// Contacts tab needed the identical fallback a third time.
+export function contactLabel(contact: Contact): string {
+  return contact.name || contact.email || contact.phone || "Unnamed contact";
 }
 
 export function openPipelineValue(deals: Deal[], statusesById: Map<string, WorkflowStatus>): Map<string, number> {
