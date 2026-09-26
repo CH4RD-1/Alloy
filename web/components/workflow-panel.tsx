@@ -2,7 +2,20 @@
 
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import type { Workflow, WorkflowStatus, WorkflowTransition, WorkflowType, Role, Invite } from "@/lib/types";
+import type {
+  Workflow,
+  WorkflowStatus,
+  WorkflowTransition,
+  WorkflowTransitionAction,
+  TransitionActionType,
+  CreateTaskActionConfig,
+  TransitionLinkedTasksActionConfig,
+  UpdateLinkedTasksActionConfig,
+  WorkflowType,
+  Role,
+  Invite,
+  Project,
+} from "@/lib/types";
 import type { MemberSummary } from "@/lib/tasks-data";
 import {
   createWorkflow,
@@ -14,6 +27,8 @@ import {
   deleteWorkflowStatus,
   upsertWorkflowTransition,
   deleteWorkflowTransition,
+  createWorkflowTransitionAction,
+  deleteWorkflowTransitionAction,
   updateMemberRole,
   createInvite,
   revokeInvite,
@@ -114,6 +129,215 @@ function WorkflowFlowChart({ statuses, transitions }: { statuses: WorkflowStatus
   );
 }
 
+const ACTION_TYPE_META: Record<TransitionActionType, string> = {
+  create_task: "Create a new task",
+  transition_linked_tasks: "Move linked tasks",
+  update_linked_tasks: "Reassign linked tasks",
+};
+
+// One-line, human summary of an existing action — the delete-and-re-add
+// list doesn't need a full re-render of the add form to explain itself.
+function describeAction(action: WorkflowTransitionAction, statusById: Map<string, WorkflowStatus>, projectById: Map<string, Project>, memberNameById: Map<string, string>): string {
+  if (action.action_type === "create_task") {
+    const config = action.config as CreateTaskActionConfig;
+    const project = projectById.get(config.project_id)?.name ?? "an unknown project";
+    const status = statusById.get(config.workflow_status_id)?.label ?? "an unknown status";
+    const assignee = config.assignee_id ? memberNameById.get(config.assignee_id) ?? "an unknown teammate" : null;
+    return `New task "${config.title || "{{deal}}"}" in ${project}, at ${status}${assignee ? `, assigned to ${assignee}` : ""}`;
+  }
+  if (action.action_type === "transition_linked_tasks") {
+    const config = action.config as TransitionLinkedTasksActionConfig;
+    const status = statusById.get(config.workflow_status_id)?.label ?? "an unknown status";
+    return `Move every linked task to ${status}`;
+  }
+  const config = action.config as UpdateLinkedTasksActionConfig;
+  const assignee = config.assignee_id ? memberNameById.get(config.assignee_id) ?? "an unknown teammate" : null;
+  return assignee ? `Reassign every linked task to ${assignee}` : "Reassign linked tasks (nothing configured yet)";
+}
+
+// Attached to one transition on a 'deal' workflow — what else happens on
+// this exact stage move (see schema.sql's own comment on
+// workflow_transition_actions, and updateDealStage/runDealStageActions in
+// lib/actions.ts for where these actually run). v1 only executes these for
+// deal-workflow transitions acting on tasks, so this editor only renders
+// when the selected workflow's type is 'deal' — see its call site below.
+function TransitionAutomations({
+  orgId,
+  transitionId,
+  actions,
+  statuses,
+  projects,
+  taskWorkflows,
+  members,
+  pending,
+  run,
+}: {
+  orgId: string;
+  transitionId: string;
+  actions: WorkflowTransitionAction[];
+  statuses: WorkflowStatus[];
+  projects: Project[];
+  taskWorkflows: Workflow[];
+  members: MemberSummary[];
+  pending: boolean;
+  run: (action: () => Promise<unknown>) => void;
+}) {
+  const statusById = new Map(statuses.map((s) => [s.id, s]));
+  const projectById = new Map(projects.map((p) => [p.id, p]));
+  const memberNameById = new Map(members.map((m) => [m.userId, m.name]));
+
+  const [actionType, setActionType] = useState<TransitionActionType>("create_task");
+  const [title, setTitle] = useState("");
+  const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
+  const [taskStatusId, setTaskStatusId] = useState("");
+  const [assigneeId, setAssigneeId] = useState("");
+  const [moveWorkflowId, setMoveWorkflowId] = useState(taskWorkflows[0]?.id ?? "");
+  const [moveStatusId, setMoveStatusId] = useState("");
+
+  const project = projects.find((p) => p.id === projectId) ?? projects[0];
+  const projectStatuses = statuses.filter((s) => s.workflow_id === project?.workflow_id).sort((a, b) => a.position - b.position);
+  const effectiveTaskStatusId = projectStatuses.some((s) => s.id === taskStatusId) ? taskStatusId : projectStatuses[0]?.id ?? "";
+
+  const moveStatuses = statuses.filter((s) => s.workflow_id === moveWorkflowId).sort((a, b) => a.position - b.position);
+  const effectiveMoveStatusId = moveStatuses.some((s) => s.id === moveStatusId) ? moveStatusId : moveStatuses[0]?.id ?? "";
+
+  function addAction() {
+    let config: CreateTaskActionConfig | TransitionLinkedTasksActionConfig | UpdateLinkedTasksActionConfig;
+    if (actionType === "create_task") {
+      if (!effectiveTaskStatusId || !project) return;
+      config = { title: title.trim(), project_id: project.id, workflow_status_id: effectiveTaskStatusId, assignee_id: assigneeId || null };
+    } else if (actionType === "transition_linked_tasks") {
+      if (!effectiveMoveStatusId) return;
+      config = { workflow_status_id: effectiveMoveStatusId };
+    } else {
+      if (!assigneeId) return;
+      config = { assignee_id: assigneeId };
+    }
+    run(() => createWorkflowTransitionAction(orgId, transitionId, actionType, config));
+    setTitle("");
+    setAssigneeId("");
+  }
+
+  const canAdd =
+    actionType === "create_task" ? !!effectiveTaskStatusId && !!project : actionType === "transition_linked_tasks" ? !!effectiveMoveStatusId : !!assigneeId;
+
+  return (
+    <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border, #e5e7eb)" }}>
+      <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--text-faint)", marginBottom: 6 }}>
+        Automations — what happens to tasks when a deal makes this move
+      </div>
+      {actions.length === 0 && <p style={{ color: "var(--text-faint)", fontSize: 11.5, margin: "0 0 6px" }}>None yet.</p>}
+      {actions.map((a) => (
+        <div key={a.id} className="crumbline" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+          <span style={{ flex: 1 }}>
+            {ACTION_TYPE_META[a.action_type]}: {describeAction(a, statusById, projectById, memberNameById)}
+          </span>
+          <button
+            className="icon-btn"
+            disabled={pending}
+            title="Remove this automation"
+            onClick={() => run(() => deleteWorkflowTransitionAction(a.id))}
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+
+      <div className="field-row" style={{ marginTop: 6, marginBottom: 6 }}>
+        <select className="select-input" style={{ flex: 1 }} value={actionType} onChange={(e) => setActionType(e.target.value as TransitionActionType)}>
+          {(Object.keys(ACTION_TYPE_META) as TransitionActionType[]).map((t) => (
+            <option key={t} value={t}>
+              {ACTION_TYPE_META[t]}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {actionType === "create_task" && (
+        <>
+          <input
+            className="text-input"
+            style={{ marginBottom: 6, width: "100%" }}
+            placeholder='Task title — "{{deal}}" becomes the deal title'
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+          <div className="field-row" style={{ marginBottom: 6 }}>
+            <select className="select-input" style={{ flex: 1 }} value={project?.id ?? ""} onChange={(e) => setProjectId(e.target.value)}>
+              {projects.length === 0 && <option value="">No projects yet</option>}
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            <select className="select-input" style={{ flex: 1 }} value={effectiveTaskStatusId} onChange={(e) => setTaskStatusId(e.target.value)}>
+              {projectStatuses.length === 0 && <option value="">Project has no workflow</option>}
+              {projectStatuses.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <select className="select-input" style={{ width: "100%", marginBottom: 6 }} value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)}>
+            <option value="">Unassigned</option>
+            {members.map((m) => (
+              <option key={m.userId} value={m.userId}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
+
+      {actionType === "transition_linked_tasks" && (
+        <div className="field-row" style={{ marginBottom: 6 }}>
+          <select
+            className="select-input"
+            style={{ flex: 1 }}
+            value={moveWorkflowId}
+            onChange={(e) => {
+              setMoveWorkflowId(e.target.value);
+              setMoveStatusId("");
+            }}
+          >
+            {taskWorkflows.length === 0 && <option value="">No task workflows yet</option>}
+            {taskWorkflows.map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.name}
+              </option>
+            ))}
+          </select>
+          <select className="select-input" style={{ flex: 1 }} value={effectiveMoveStatusId} onChange={(e) => setMoveStatusId(e.target.value)}>
+            {moveStatuses.length === 0 && <option value="">No statuses</option>}
+            {moveStatuses.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {actionType === "update_linked_tasks" && (
+        <select className="select-input" style={{ width: "100%", marginBottom: 6 }} value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)}>
+          <option value="">Pick a teammate…</option>
+          {members.map((m) => (
+            <option key={m.userId} value={m.userId}>
+              {m.name}
+            </option>
+          ))}
+        </select>
+      )}
+
+      <button className="small-btn" disabled={!canAdd || pending} onClick={addAction}>
+        Add automation
+      </button>
+    </div>
+  );
+}
+
 // Ported from the prototype's renderWorkflowPanel(), fully overhauled: many
 // workflows per org now instead of one (a left-hand list, grouped by type,
 // with a create form), each with its own fully add/rename/recolor/reorder/
@@ -128,6 +352,8 @@ export function WorkflowPanel({
   workflows,
   statuses,
   transitions,
+  transitionActions,
+  projects,
   members,
   currentUserRole,
   vocabTask,
@@ -138,6 +364,8 @@ export function WorkflowPanel({
   workflows: Workflow[];
   statuses: WorkflowStatus[];
   transitions: WorkflowTransition[];
+  transitionActions: WorkflowTransitionAction[];
+  projects: Project[];
   members: MemberSummary[];
   currentUserRole: Role;
   vocabTask: string;
@@ -175,6 +403,10 @@ export function WorkflowPanel({
   );
   const statusById = new Map(workflowStatuses.map((s) => [s.id, s]));
   const statusLabel = (id: string) => statusById.get(id)?.label ?? "Unknown";
+  // Automations only run for 'deal' workflows today (see runDealStageActions
+  // in lib/actions.ts) — the editor below only renders for those, so this is
+  // only ever read in that branch, but it's cheap enough to just compute.
+  const taskWorkflows = useMemo(() => workflows.filter((w) => w.type === "task" || w.type === "helpdesk"), [workflows]);
 
   const groupedWorkflows: Record<WorkflowType, Workflow[]> = { task: [], helpdesk: [], asset: [], deal: [] };
   workflows.forEach((w) => groupedWorkflows[w.type]?.push(w));
@@ -483,10 +715,18 @@ export function WorkflowPanel({
 
                       <div className="field-group">
                         <span className="field-label">Transitions</span>
-                        {workflowTransitions.length === 0 && (
+                        {selectedWorkflow.type === "deal" ? (
                           <p style={{ color: "var(--text-faint)", fontSize: 12 }}>
-                            No transitions defined — {taskNoun}s on this workflow can&apos;t change status at all yet.
+                            A deal can move to any stage regardless of what&apos;s defined here — &quot;Allowed for&quot; and the two
+                            require-complete checks below don&apos;t apply to deals yet, only to Regular Tasks/Helpdesk/Assets. Define
+                            a transition here anyway to attach an automation to that exact move (below each one).
                           </p>
+                        ) : (
+                          workflowTransitions.length === 0 && (
+                            <p style={{ color: "var(--text-faint)", fontSize: 12 }}>
+                              No transitions defined — {taskNoun}s on this workflow can&apos;t change status at all yet.
+                            </p>
+                          )
                         )}
                         {workflowTransitions.map((t) => (
                           <div key={t.id} className="field-def-card">
@@ -519,6 +759,19 @@ export function WorkflowPanel({
                                 </>
                               )}
                             </div>
+                            {selectedWorkflow.type === "deal" && (
+                              <TransitionAutomations
+                                orgId={orgId}
+                                transitionId={t.id}
+                                actions={transitionActions.filter((a) => a.transition_id === t.id).sort((a, b) => a.position - b.position)}
+                                statuses={statuses}
+                                projects={projects}
+                                taskWorkflows={taskWorkflows}
+                                members={members}
+                                pending={pending}
+                                run={run}
+                              />
+                            )}
                           </div>
                         ))}
 

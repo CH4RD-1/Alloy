@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, type DragEvent } from "react";
+import { useRouter } from "next/navigation";
 import type { Deal, Company, WorkflowStatus } from "@/lib/types";
 import type { MemberSummary } from "@/lib/tasks-data";
 import { buildDealColumns, dealValueLabel } from "@/lib/crm-view";
@@ -140,6 +141,7 @@ export function DealsView({
   search: string;
   onSelectDeal: (id: string) => void;
 }) {
+  const router = useRouter();
   const [draggingDealId, setDraggingDealId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -182,7 +184,14 @@ export function DealsView({
     if (previous === statusId) return;
     setDeals((prev) => prev.map((d) => (d.id === dealId ? { ...d, status_id: statusId } : d)));
     try {
-      await updateDealStage(dealId, statusId);
+      // A configured transition automation (see the Workflow & roles
+      // editor's Automations section) can create/move/reassign tasks —
+      // affectedTasks tells us to fall back to a full refresh so the Tasks
+      // side picks that up, since it doesn't hold its own local state yet.
+      // A move with no automation attached (the common case) never pays
+      // this cost.
+      const { affectedTasks } = await updateDealStage(dealId, statusId);
+      if (affectedTasks) router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't move that deal.");
       if (previous) setDeals((prev) => prev.map((d) => (d.id === dealId ? { ...d, status_id: previous } : d)));

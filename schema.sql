@@ -246,6 +246,37 @@ create table workflow_transitions (
 create index on workflow_transitions (org_id);
 create index on workflow_transitions (workflow_id);
 
+-- Cross-entity automation — what else happens when a transition fires. Kept
+-- as its own table (rather than a column on workflow_transitions) so a
+-- single transition can carry any number of actions, run in `position`
+-- order. Nothing here gates the move itself (that's still
+-- allowed_roles/require_*_complete above); an action fires only after the
+-- move already went through. v1 only wires these up for 'deal'-type
+-- workflows acting on tasks (see updateDealStage in lib/actions.ts) — a
+-- transition on a 'task' workflow can have actions rows too, but nothing
+-- executes them yet. `config`'s shape depends on action_type (see the
+-- TransitionActionConfig union in lib/types.ts for the exact fields):
+--   create_task              — makes one new task, linked to the deal via
+--                               tasks.deal_id below
+--   transition_linked_tasks  — moves every task already linked to the deal
+--                               into a target status (skipping any whose
+--                               project runs a different task workflow than
+--                               that status belongs to — see that function's
+--                               own comment)
+--   update_linked_tasks      — reassigns every task linked to the deal
+create table workflow_transition_actions (
+  id             uuid primary key default gen_random_uuid(),
+  org_id         uuid not null references orgs(id) on delete cascade,
+  transition_id  uuid not null references workflow_transitions(id) on delete cascade,
+  action_type    text not null check (action_type in ('create_task', 'transition_linked_tasks', 'update_linked_tasks')),
+  config         jsonb not null default '{}',
+  position       int not null default 0,
+  created_at     timestamptz not null default now()
+);
+
+create index on workflow_transition_actions (org_id);
+create index on workflow_transition_actions (transition_id);
+
 -- ----------------------------------------------------------------------------
 -- Projects, teams (buckets), tags, custom fields
 -- ----------------------------------------------------------------------------
@@ -499,8 +530,14 @@ create table tasks (
 
   -- Multi-channel ticket intake
   channel             text not null default 'internal' check (channel in ('internal','portal','email','whatsapp')),
-  external_thread_ref text,          -- email Message-ID chain, or WhatsApp conversation id — used to thread replies
+  external_thread_ref text,          -- email Message-ID chain, or WhatsApp conversation id — used to thread requester replies
   contact_id          uuid references contacts(id) on delete set null,  -- external requester, when channel != 'internal'
+
+  -- CRM cross-entity link (workflow automation, see workflow_transition_actions
+  -- above) — set for a task a deal-stage transition created, or points at a
+  -- deal a person linked by hand from the task panel. Deleting the deal
+  -- un-links its tasks rather than deleting them.
+  deal_id             uuid references deals(id) on delete set null,
 
   created_by          uuid references users(id) on delete set null,     -- null if created by an external contact
   created_at          timestamptz not null default now(),
@@ -519,6 +556,7 @@ create index on tasks (parent_task_id);
 create index on tasks (status_id);
 create index on tasks (asset_id) where asset_id is not null;
 create index on tasks (contact_id) where contact_id is not null;
+create index on tasks (deal_id) where deal_id is not null;
 
 create table task_tags (
   task_id  uuid not null references tasks(id) on delete cascade,
@@ -956,6 +994,11 @@ create policy workflow_statuses_tenant_isolation on workflow_statuses
 
 alter table workflow_transitions enable row level security;
 create policy workflow_transitions_tenant_isolation on workflow_transitions
+  using (is_org_member(org_id))
+  with check (is_org_member(org_id));
+
+alter table workflow_transition_actions enable row level security;
+create policy workflow_transition_actions_tenant_isolation on workflow_transition_actions
   using (is_org_member(org_id))
   with check (is_org_member(org_id));
 

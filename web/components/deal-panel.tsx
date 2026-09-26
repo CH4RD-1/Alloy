@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import type { Deal, Company, Contact, WorkflowStatus } from "@/lib/types";
 import type { MemberSummary } from "@/lib/tasks-data";
 import { updateDealFields, updateDealStage, deleteDeal, getOrgContactsData } from "@/lib/actions";
@@ -30,6 +31,7 @@ export function DealPanel({
   onSelectCompany: (id: string) => void;
   onClose: () => void;
 }) {
+  const router = useRouter();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -107,7 +109,13 @@ export function DealPanel({
               onChange={(e) => {
                 const statusId = e.target.value;
                 patchLocal({ status_id: statusId });
-                run(() => updateDealStage(deal.id, statusId));
+                // See deals-view.tsx's own comment on handleDrop — a
+                // configured transition automation can touch tasks, which
+                // still needs a full refresh to show up.
+                run(async () => {
+                  const { affectedTasks } = await updateDealStage(deal.id, statusId);
+                  if (affectedTasks) router.refresh();
+                });
               }}
             >
               {orderedStatuses.map((s) => (

@@ -45,6 +45,7 @@ export default async function DashboardPage() {
         links={data.links}
         statuses={data.statuses}
         transitions={data.transitions}
+        transitionActions={data.transitionActions}
         workflows={data.workflows}
         teams={data.teams}
         projects={data.projects}
