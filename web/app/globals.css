@@ -2280,6 +2280,112 @@ textarea.text-input {
   margin-top: 2px;
 }
 
+/* ============ REPORTS (Phase D — components/reports-view.tsx) ============ */
+/* A plain <table>, not a .list-table-style CSS grid — a report's column set
+   varies (Helpdesk vs. task-completion), and unlike the row lists elsewhere
+   in this app a report row isn't a single always-clickable entity, so the
+   simpler native table semantics fit better here than reusing .list-table. */
+.report-table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--surface);
+  font-size: 12.5px;
+}
+.report-table th,
+.report-table td {
+  padding: 8px 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+.report-table th {
+  background: var(--surface-2);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--border);
+}
+.report-table td {
+  border-top: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+.report-table tbody tr:first-child td {
+  border-top: none;
+}
+.report-table tr.report-row-total td {
+  border-top: 1px solid var(--border-strong);
+  font-weight: 700;
+  background: var(--surface-2);
+}
+/* A tiny inline completion/compliance bar next to a percentage in a report
+   table cell — .progress-bg/.done reuse the same tokens the SLA chips and
+   asset-chip-allocated already use, so "good" reads the same color
+   everywhere in the app rather than inventing a third meaning for green. */
+.report-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.report-bar-track {
+  width: 54px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--progress-bg);
+  overflow: hidden;
+}
+.report-bar-fill {
+  height: 100%;
+  background: var(--done);
+  border-radius: 3px;
+}
+.report-bar-fill.report-bar-warn {
+  background: var(--blocked);
+}
+/* Weekly-completions trend — one bar per week, tallest bar sets the scale.
+   Deliberately hand-rolled divs rather than a charting library, matching
+   the rest of this app's own from-scratch visuals (gantt-view.tsx's bars,
+   the sla-chip countdowns) rather than adding a new dependency for one
+   small trend strip. */
+.report-trend {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  height: 90px;
+  padding-top: 6px;
+}
+.report-trend-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+  gap: 5px;
+}
+.report-trend-bar {
+  width: 100%;
+  max-width: 34px;
+  min-height: 2px;
+  border-radius: 3px 3px 0 0;
+  background: var(--progress);
+}
+.report-trend-count {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.report-trend-label {
+  font-size: 9.5px;
+  color: var(--text-faint);
+}
+.report-section {
+  margin-bottom: 22px;
+}
+
 /* ============ CONVERSATION (task panel — email/WhatsApp) ============ */
 .conversation-thread {
   display: flex;

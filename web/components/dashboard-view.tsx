@@ -5,6 +5,7 @@ import { buildDashboardStats, gatedTransitionsFor } from "@/lib/dashboard-view";
 import { StatusChip } from "@/components/task-list-view";
 import { recentActivityForUser, timeAgo } from "@/lib/activity-view";
 import { openPipelineValue, currencySymbol } from "@/lib/crm-view";
+import type { ReportsResult } from "@/lib/reports-view";
 
 // Ported from the prototype's renderDashboardView() — four stat tiles, two
 // task lists ("Your tasks" / "Awaiting your review"), and (now that a real
@@ -25,6 +26,9 @@ export function DashboardView({
   dealStatusesById,
   dealsLoaded,
   onOpenDeals,
+  reportsData,
+  reportsLoaded,
+  onOpenReports,
 }: {
   allRows: TaskRow[];
   projects: Project[];
@@ -46,6 +50,13 @@ export function DashboardView({
   dealStatusesById: Map<string, WorkflowStatus>;
   dealsLoaded: boolean;
   onOpenDeals: () => void;
+  // Reporting (Phase D) — a summary slice of the same org-wide metrics the
+  // full Reports tab shows (see components/reports-view.tsx), computed once
+  // by TasksWorkspace and passed down here rather than recomputed — this
+  // view just picks a couple of headline numbers out of it.
+  reportsData: ReportsResult;
+  reportsLoaded: boolean;
+  onOpenReports: () => void;
 }) {
   const today = new Date().toISOString().slice(0, 10);
   const rowByTaskId = new Map(allRows.map((r) => [r.task.id, r]));
@@ -119,6 +130,41 @@ export function DashboardView({
               onClick={onOpenDeals}
             />
           ))}
+        </div>
+      )}
+
+      {/* Reporting (Phase D) — a headline slice of the full Reports tab
+          (components/reports-view.tsx): first-response/resolution SLA
+          compliance and completion rate, org-wide. Hidden until reportsData
+          has actually loaded rather than flashing "0%/—" for a moment, and
+          hidden for good (no helpdesk row) only once loaded confirms there's
+          truly nothing to show — same "don't clutter an empty feature" call
+          the pipeline row above already makes. */}
+      {reportsLoaded && (reportsData.helpdeskTotals || reportsData.projectTotals) && (
+        <div className="stat-row" style={{ marginTop: 10 }}>
+          {reportsData.helpdeskTotals &&
+            (() => {
+              const hd = reportsData.helpdeskTotals!;
+              const frTotal = hd.firstResponseMet + hd.firstResponseMissed;
+              const resTotal = hd.resolutionMet + hd.resolutionMissed;
+              const frPct = frTotal > 0 ? Math.round((hd.firstResponseMet / frTotal) * 100) : null;
+              const resPct = resTotal > 0 ? Math.round((hd.resolutionMet / resTotal) * 100) : null;
+              return (
+                <>
+                  <StatTile label="First-response SLA met" value={frPct === null ? "—" : `${frPct}%`} tone={frPct !== null && frPct < 90 ? "warn" : undefined} onClick={onOpenReports} />
+                  <StatTile label="Resolution SLA met" value={resPct === null ? "—" : `${resPct}%`} tone={resPct !== null && resPct < 90 ? "warn" : undefined} onClick={onOpenReports} />
+                  <StatTile label="Tickets needing attention" value={hd.breachedOpenCount} tone={hd.breachedOpenCount ? "bad" : undefined} onClick={onOpenReports} />
+                </>
+              );
+            })()}
+          {reportsData.projectTotals &&
+            (() => {
+              const pr = reportsData.projectTotals!;
+              const pct = pr.totalCount > 0 ? Math.round((pr.doneCount / pr.totalCount) * 100) : null;
+              return (
+                <StatTile label={`${vocabTask} completion rate`} value={pct === null ? "—" : `${pct}%`} onClick={onOpenReports} />
+              );
+            })()}
         </div>
       )}
 

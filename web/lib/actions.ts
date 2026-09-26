@@ -3994,3 +3994,38 @@ export async function getDealActivityLog(dealId: string): Promise<DealActivityLo
   if (error) throw new Error(error.message);
   return (data ?? []) as DealActivityLogEntry[];
 }
+
+// Reporting (Phase D) — fetched once on mount by TasksWorkspace, same
+// "not part of getWorkspaceData" shape as getCompaniesData/getDealsData/
+// getOrgContactsData above (never touches the router.refresh() critical
+// path). Deliberately its own query rather than reusing the activityLog/
+// ticketMessages props that component already has: those two are capped to
+// the most recent 300 org-wide rows (see WorkspaceData's own comment in
+// lib/tasks-data.ts) — fine for "show this one ticket's conversation", but
+// an aggregate SLA/completion report needs an org's *entire* history or it
+// would silently under-count anything older than the cap. Selecting only
+// the columns lib/reports-view.ts actually needs (not select("*")), and
+// filtering server-side to just status-change rows / just outbound+public
+// messages, keeps this cheap despite being unbounded.
+export async function getReportsData(orgId: string): Promise<{
+  activity: { task_id: string; to_status_id: string | null; created_at: string }[];
+  messages: { task_id: string; created_at: string }[];
+}> {
+  const { supabase } = await requireUser();
+  const [{ data: activity, error: activityError }, { data: messages, error: messagesError }] = await Promise.all([
+    supabase
+      .from("activity_log")
+      .select("task_id, to_status_id, created_at")
+      .eq("org_id", orgId)
+      .eq("type", "status"),
+    supabase
+      .from("ticket_messages")
+      .select("task_id, created_at")
+      .eq("org_id", orgId)
+      .eq("direction", "outbound")
+      .eq("visibility", "public"),
+  ]);
+  if (activityError) throw new Error(activityError.message);
+  if (messagesError) throw new Error(messagesError.message);
+  return { activity: activity ?? [], messages: messages ?? [] };
+}

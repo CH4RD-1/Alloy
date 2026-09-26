@@ -51,7 +51,9 @@ import { DealsView } from "@/components/deals-view";
 import { DealPanel } from "@/components/deal-panel";
 import { ContactsView } from "@/components/contacts-view";
 import { ContactPanel } from "@/components/contact-panel";
-import { getCompaniesData, getDealsData, getOrgContactsData } from "@/lib/actions";
+import { getCompaniesData, getDealsData, getOrgContactsData, getReportsData } from "@/lib/actions";
+import { buildReportsData, type ReportActivityRow, type ReportMessageRow } from "@/lib/reports-view";
+import { ReportsView } from "@/components/reports-view";
 import { DashboardView } from "@/components/dashboard-view";
 import { ProjectsPanel } from "@/components/projects-panel";
 import { TeamsPanel } from "@/components/teams-panel";
@@ -152,7 +154,17 @@ function ContactsIcon() {
   );
 }
 
-type ViewKey = "dashboard" | "list" | "buckets" | "gantt" | "calendar" | "kb" | "assets" | "companies" | "deals" | "contacts";
+// Reporting (Phase D) — a simple bar-chart glyph, same small inline style as
+// every other view-tab icon above.
+function ReportsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 20V10M12 20V4M20 20v-7" />
+    </svg>
+  );
+}
+
+type ViewKey = "dashboard" | "list" | "buckets" | "gantt" | "calendar" | "kb" | "assets" | "companies" | "deals" | "contacts" | "reports";
 
 export function TasksWorkspace({
   rows,
@@ -269,6 +281,15 @@ export function TasksWorkspace({
   // companies/deals just above, for the same reason (see the effect below).
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [crmLoaded, setCrmLoaded] = useState(false);
+  // Reporting (Phase D) — same fetch-once-on-mount shape as Companies/Deals/
+  // Contacts above, and for the same reason (see getReportsData's own
+  // comment in lib/actions.ts): the org's full status-change/message
+  // history this needs is deliberately not part of getWorkspaceData's own
+  // capped activityLog/ticketMessages props, so it's fetched separately and
+  // held here rather than ever running again on a router.refresh().
+  const [reportActivity, setReportActivity] = useState<ReportActivityRow[]>([]);
+  const [reportMessages, setReportMessages] = useState<ReportMessageRow[]>([]);
+  const [reportsLoaded, setReportsLoaded] = useState(false);
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [selectedDealId, setSelectedDealId] = useState<string | null>(null);
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
@@ -515,6 +536,42 @@ export function TasksWorkspace({
     getDealsData(orgId).then(setDeals);
   }, [orgId]);
 
+  // Reporting (Phase D) — its own one-time fetch, same "runs once on mount,
+  // never again" shape as the CRM effect above and for the same reason: this
+  // needs the org's *whole* status-change/message history, not the capped
+  // slice getWorkspaceData's own activityLog/ticketMessages props carry (see
+  // getReportsData's own comment in lib/actions.ts).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { activity, messages } = await getReportsData(orgId);
+      if (cancelled) return;
+      setReportActivity(activity);
+      setReportMessages(messages);
+      setReportsLoaded(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [orgId]);
+
+  const reportsData = useMemo(
+    () =>
+      buildReportsData({
+        tasks: allRows.map((r) => r.task),
+        projects,
+        statuses,
+        workflows,
+        activity: reportActivity,
+        messages: reportMessages,
+        deals,
+        dealStatusesById,
+        slaFirstResponseHours,
+        slaResolutionDays,
+      }),
+    [allRows, projects, statuses, workflows, reportActivity, reportMessages, deals, dealStatusesById, slaFirstResponseHours, slaResolutionDays]
+  );
+
   return (
     <div className="app-shell">
       <AppSidebar
@@ -574,6 +631,9 @@ export function TasksWorkspace({
           <button type="button" className={`view-tab ${view === "contacts" ? "active" : ""}`} onClick={() => setView("contacts")}>
             <ContactsIcon /> Contacts
           </button>
+          <button type="button" className={`view-tab ${view === "reports" ? "active" : ""}`} onClick={() => setView("reports")}>
+            <ReportsIcon /> Reports
+          </button>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <input
@@ -604,6 +664,9 @@ export function TasksWorkspace({
           dealStatusesById={dealStatusesById}
           dealsLoaded={crmLoaded}
           onOpenDeals={() => setView("deals")}
+          reportsData={reportsData}
+          reportsLoaded={reportsLoaded}
+          onOpenReports={() => setView("reports")}
         />
       )}
 
@@ -702,6 +765,9 @@ export function TasksWorkspace({
           search={search}
           onSelectContact={setSelectedContactId}
         />
+      )}
+      {view === "reports" && (
+        <ReportsView data={reportsData} loaded={reportsLoaded} vocabTask={vocabTask} onOpenDeals={() => setView("deals")} />
       )}
 
       {selectedTaskId && (
