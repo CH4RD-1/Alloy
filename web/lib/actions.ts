@@ -18,6 +18,8 @@ import type {
   Deal,
   Contact,
   Task,
+  ScheduleChange,
+  DealActivityLogEntry,
   WorkflowTransitionAction,
   TransitionActionType,
   TransitionActionConfig,
@@ -98,6 +100,38 @@ async function logActivity(
     });
   } catch {
     // Best-effort — see comment above.
+  }
+}
+
+// Deal activity log's own write side — same shape and same best-effort
+// swallow-on-failure as logActivity() above, just for deal_activity_log
+// (see that table's own comment in schema.sql/deal_activity_log.sql for why
+// it's a separate table rather than widening activity_log itself). Every
+// call site here has a real signed-in caller (unlike logActivity, which
+// also serves the Portal's service-role path), so there's no
+// actor_contact_id branch to take.
+async function logDealActivity(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  input: {
+    orgId: string;
+    dealId: string;
+    type: "created" | "stage";
+    fromStatusId?: string | null;
+    toStatusId?: string | null;
+    actorUserId: string;
+  }
+) {
+  try {
+    await supabase.from("deal_activity_log").insert({
+      org_id: input.orgId,
+      deal_id: input.dealId,
+      type: input.type,
+      from_status_id: input.fromStatusId ?? null,
+      to_status_id: input.toStatusId ?? null,
+      actor_user_id: input.actorUserId,
+    });
+  } catch {
+    // Best-effort — see logActivity's own comment above.
   }
 }
 
@@ -489,9 +523,12 @@ export async function removeLink(fromTaskId: string, toTaskId: string, linkType:
 // prototype's autoArrange()/propagateSchedule() (see gantt-schedule.ts for
 // the actual math). This first Gantt pass has no live drag-to-reschedule,
 // so this just fetches every non-helpdesk task + link in the org, computes
-// the settled schedule, and writes back only what changed. Returns how many
-// tasks moved, so the UI can say something more useful than silence.
-export async function autoArrangeSchedule(orgId: string): Promise<number> {
+// the settled schedule, and writes back only what changed. Returns every
+// task that actually moved (id + its new dates), not just a count — the
+// Gantt view's optimistic-patch overlay applies these directly rather than
+// waiting on router.refresh() (see ScheduleChange's own comment in
+// lib/types.ts).
+export async function autoArrangeSchedule(orgId: string): Promise<ScheduleChange[]> {
   const { supabase } = await requireUser();
 
   const [{ data: tasks }, { data: links }, { data: projects }] = await Promise.all([
@@ -543,7 +580,7 @@ export async function autoArrangeSchedule(orgId: string): Promise<number> {
     );
     revalidatePath("/dashboard");
   }
-  return finalChanges.size;
+  return Array.from(finalChanges.entries()).map(([id, { start, due }]) => ({ id, start_date: start, due_date: due }));
 }
 
 // The Gantt view's live drag-to-move / drag-to-resize commit — ported from
@@ -563,7 +600,14 @@ export async function autoArrangeSchedule(orgId: string): Promise<number> {
 // gantt-view.tsx), but this is what actually decides and persists it, the
 // same "never trust the client alone" principle every other server-side
 // gate in this file already follows.
-export async function updateTaskSchedule(orgId: string, taskId: string, start: string, due: string): Promise<number> {
+//
+// Returns every task the commit actually moved — the dragged task itself
+// plus whatever the cascade/containment math pulled along with it — so the
+// Gantt view's optimistic-patch overlay can apply all of them the instant
+// this resolves, instead of only patching the one bar it already knows
+// about and leaving every cascaded one to wait on router.refresh() (see
+// ScheduleChange's own comment in lib/types.ts).
+export async function updateTaskSchedule(orgId: string, taskId: string, start: string, due: string): Promise<ScheduleChange[]> {
   const { supabase } = await requireUser();
 
   const [{ data: tasks }, { data: links }, { data: projects }] = await Promise.all([
@@ -588,7 +632,7 @@ export async function updateTaskSchedule(orgId: string, taskId: string, start: s
       parentId: t.parent_task_id,
     }));
 
-  if (!baseTasks.some((t) => t.id === taskId)) return 0;
+  if (!baseTasks.some((t) => t.id === taskId)) return [];
 
   // Containment part 1: can't shrink a parent past what its own subtasks
   // (and their own subtasks) currently need.
@@ -622,7 +666,7 @@ export async function updateTaskSchedule(orgId: string, taskId: string, start: s
     )
   );
   revalidatePath("/dashboard");
-  return finalChanges.size;
+  return Array.from(finalChanges.entries()).map(([id, { start: s, due: d }]) => ({ id, start_date: s, due_date: d }));
 }
 
 // Rewrites a set of top-level tasks' Gantt-only position 0..n-1 in one
@@ -3679,7 +3723,7 @@ export async function createDeal(
     expectedCloseDate?: string | null;
   }
 ): Promise<Deal> {
-  const { supabase } = await requireUser();
+  const { supabase, user } = await requireUser();
   const { data, error } = await supabase
     .from("deals")
     .insert({
@@ -3697,6 +3741,7 @@ export async function createDeal(
     .select("*")
     .single();
   if (error) throw new Error(error.message);
+  await logDealActivity(supabase, { orgId, dealId: data.id as string, type: "created", actorUserId: user.id });
   return data as Deal;
 }
 
@@ -3747,6 +3792,15 @@ export async function updateDealStage(dealId: string, statusId: string): Promise
 
   if (fromStatusId === statusId) return { affectedTasks: false };
 
+  await logDealActivity(supabase, {
+    orgId: deal.org_id as string,
+    dealId,
+    type: "stage",
+    fromStatusId,
+    toStatusId: statusId,
+    actorUserId: user.id,
+  });
+
   return runDealStageActions(supabase, {
     orgId: deal.org_id as string,
     dealId,
@@ -3762,4 +3816,22 @@ export async function deleteDeal(dealId: string): Promise<void> {
   const { supabase } = await requireUser();
   const { error } = await supabase.from("deals").delete().eq("id", dealId);
   if (error) throw new Error(error.message);
+}
+
+// Fetched on demand by DealPanel when it opens (same "not part of the
+// server-rendered WorkspaceData props" shape as getOrgContactsData just
+// above it) rather than folded into getDealsData/getWorkspaceData — a
+// deal's activity is detail-view-only data, never needed for the kanban
+// board or the deals list, so there's no reason to pay for every deal's
+// history on every load the way that would.
+export async function getDealActivityLog(dealId: string): Promise<DealActivityLogEntry[]> {
+  const { supabase } = await requireUser();
+  const { data, error } = await supabase
+    .from("deal_activity_log")
+    .select("*")
+    .eq("deal_id", dealId)
+    .order("created_at", { ascending: false })
+    .limit(25);
+  if (error) throw new Error(error.message);
+  return (data ?? []) as DealActivityLogEntry[];
 }

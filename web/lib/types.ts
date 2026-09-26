@@ -254,6 +254,21 @@ export interface Task {
   position: number;
 }
 
+// What updateTaskSchedule/autoArrangeSchedule (lib/actions.ts) actually
+// changed on commit — every task whose start/due moved, not just the one
+// directly dragged (a cascade can push a blocked task, resync a
+// concurrent/clone partner, or grow a parent for containment). The Gantt
+// view's optimistic-patch overlay (tasks-workspace.tsx) applies these
+// straight to its local patch map the moment the action resolves, instead
+// of waiting on router.refresh() to re-fetch and re-render with the new
+// dates — see that overlay's own comment for why a full local-state lift
+// isn't used instead.
+export interface ScheduleChange {
+  id: string;
+  start_date: string;
+  due_date: string;
+}
+
 export interface TaskLink {
   id: string;
   org_id: string;
@@ -319,6 +334,26 @@ export interface ActivityLogEntry {
   to_status_id: string | null; // only set when type = "status"
   actor_user_id: string | null;
   actor_contact_id: string | null;
+  created_at: string;
+}
+
+// A Phase A/B leftover — deal_activity_log's own append-only audit trail,
+// same shape as ActivityLogEntry above but scoped to deals: only a deal's
+// creation and its stage moves are recorded (see deal_activity_log.sql's own
+// comment for why this is a separate table rather than widening
+// activity_log itself). No actor_contact_id: a deal has no anonymous-
+// Portal-submission path the way a task does, so every row here is a
+// signed-in member's own action.
+export type DealActivityType = "created" | "stage";
+
+export interface DealActivityLogEntry {
+  id: string;
+  org_id: string;
+  deal_id: string;
+  type: DealActivityType;
+  from_status_id: string | null; // only set when type = "stage"
+  to_status_id: string | null; // only set when type = "stage"
+  actor_user_id: string | null;
   created_at: string;
 }
 

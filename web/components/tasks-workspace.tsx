@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { TaskRow } from "@/lib/list-view";
 import { flattenRows } from "@/lib/list-view";
 import { buildBucketColumns } from "@/lib/buckets-view";
+import type { TaskPatch } from "@/lib/task-patches";
+import { applyTaskPatches, patchMatchesRow } from "@/lib/task-patches";
 import type {
   WorkflowStatus,
   WorkflowTransition,
@@ -296,7 +298,77 @@ export function TasksWorkspace({
   const effectiveUserRole = (userSwitchActive && viewingAs) ? viewingAs.role : currentUserRole;
   const actingAsUserId = userSwitchActive && viewingAs ? viewingAs.id : null;
 
-  const allRows = useMemo(() => flattenRows(rows), [rows]);
+  // Optimistic patch overlay for drag interactions (Gantt schedule
+  // drag/resize, Buckets team drag) — deliberately NOT a full local-state
+  // lift of `rows`. A full lift (seed a useState once from the `rows` prop,
+  // then mutate that state directly instead of the prop) would silently
+  // break every *other* mutation in this app, which still works by calling
+  // a server action and then router.refresh(): refresh() updates the props
+  // this component receives, but a useState initializer only runs once, so
+  // already-initialized local state would just stop tracking the server at
+  // all for every mutation that isn't part of this overlay.
+  //
+  // Instead `rows` stays exactly what it always was — a plain prop, rebuilt
+  // server-side by getWorkspaceData()/buildRows() and refreshed by the same
+  // router.refresh() every other view already calls. This map holds small,
+  // short-lived per-task patches (new dates from a Gantt drag, a new
+  // team/teamName/teamColor from a Buckets drag) applied on top of it purely
+  // for instant visual feedback in the gap between "the drag ended" and
+  // "router.refresh() finished re-fetching and re-rendering with the real
+  // data" — see gantt-view.tsx's commitSchedule and buckets-view.tsx's
+  // handleDrop for where patches are set. A patch for a given task is
+  // cleared as soon as the next refresh's fresh `rows` prop actually shows
+  // that task's new value (see the effect below), so it's never a second
+  // source of truth — just a bridge over one render's worth of staleness.
+  const [taskPatches, setTaskPatches] = useState<Map<string, TaskPatch>>(new Map());
+
+  const patchTasks = useCallback((patches: Record<string, TaskPatch>) => {
+    setTaskPatches((prev) => {
+      const next = new Map(prev);
+      Object.entries(patches).forEach(([id, patch]) => {
+        next.set(id, { ...next.get(id), ...patch });
+      });
+      return next;
+    });
+  }, []);
+
+  const allRowsById = useMemo(() => {
+    const m = new Map<string, TaskRow>();
+    flattenRows(rows).forEach((r) => m.set(r.task.id, r));
+    return m;
+  }, [rows]);
+
+  // Once a fresh `rows` prop lands (router.refresh() resolved) with a value
+  // that already matches what a patch predicted, that patch has done its
+  // job and would otherwise sit around forever (nothing else ever clears
+  // it) — drop exactly the ones whose predicted fields now agree with the
+  // real prop data, task by task, rather than clearing the whole map and
+  // risking a visible snap-back for a patch whose refresh hasn't landed yet.
+  useEffect(() => {
+    if (taskPatches.size === 0) return;
+    setTaskPatches((prev) => {
+      if (prev.size === 0) return prev;
+      let next: Map<string, TaskPatch> | null = null;
+      prev.forEach((patch, id) => {
+        const row = allRowsById.get(id);
+        if (row && patchMatchesRow(patch, row)) {
+          if (!next) next = new Map(prev);
+          next.delete(id);
+        }
+      });
+      return next ?? prev;
+    });
+    // allRowsById is derived from `rows`, so this only needs to re-check
+    // when a fresh server row set actually lands.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows]);
+
+  const patchedRows = useMemo(() => {
+    if (taskPatches.size === 0) return rows;
+    return rows.map((r) => applyTaskPatches(r, taskPatches));
+  }, [rows, taskPatches]);
+
+  const allRows = useMemo(() => flattenRows(patchedRows), [patchedRows]);
 
   // Ported from the prototype's set-project handler: switching the active
   // project clears the team filter, since a merged "All projects" team key
@@ -319,8 +391,8 @@ export function TasksWorkspace({
   // prototype used — Dashboard, Knowledge base and Assets stay unfiltered by
   // them (see matchesFilters()'s call sites in the prototype).
   const sidebarFiltered = useMemo(
-    () => rows.filter((r) => matchesProjectTeamFilters(r, projectFilter, teamFilters)),
-    [rows, projectFilter, teamFilters]
+    () => patchedRows.filter((r) => matchesProjectTeamFilters(r, projectFilter, teamFilters)),
+    [patchedRows, projectFilter, teamFilters]
   );
   const sidebarFilteredAll = useMemo(
     () => allRows.filter((r) => matchesProjectTeamFilters(r, projectFilter, teamFilters)),
@@ -485,6 +557,10 @@ export function TasksWorkspace({
           vocabTask={vocabTask}
           activityLog={activityLog}
           onSelectTask={setSelectedTaskId}
+          deals={deals}
+          dealStatusesById={dealStatusesById}
+          dealsLoaded={crmLoaded}
+          onOpenDeals={() => setView("deals")}
         />
       )}
 
@@ -503,7 +579,13 @@ export function TasksWorkspace({
 
       {view === "list" && <TaskListView rows={listRows} vocabTask={vocabTask} onSelectTask={setSelectedTaskId} />}
       {view === "buckets" && (
-        <BucketsView columns={bucketColumns} vocabTask={vocabTask} vocabTeam={vocabTeam} onSelectTask={setSelectedTaskId} />
+        <BucketsView
+          columns={bucketColumns}
+          vocabTask={vocabTask}
+          vocabTeam={vocabTeam}
+          onSelectTask={setSelectedTaskId}
+          onPatchTasks={patchTasks}
+        />
       )}
       {view === "gantt" && (
         <GanttView
@@ -514,6 +596,7 @@ export function TasksWorkspace({
           vocabTask={vocabTask}
           onSelectTask={setSelectedTaskId}
           onPreviewTask={(id, x, y) => setPreviewTask({ taskId: id, x, y })}
+          onPatchTasks={patchTasks}
         />
       )}
       {view === "calendar" && (
@@ -615,6 +698,7 @@ export function TasksWorkspace({
           onSelectDoc={setSelectedDocId}
           onWidthChange={setMainPanelWidthPx}
           onClose={() => setSelectedTaskId(null)}
+          onPatchTasks={patchTasks}
         />
       )}
 

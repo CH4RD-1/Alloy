@@ -1,9 +1,10 @@
 import type { TaskRow } from "@/lib/list-view";
 import { fmtDate, hueFor, initials } from "@/lib/list-view";
-import type { Project, WorkflowStatus, WorkflowTransition, Role, ActivityLogEntry } from "@/lib/types";
+import type { Project, WorkflowStatus, WorkflowTransition, Role, ActivityLogEntry, Deal } from "@/lib/types";
 import { buildDashboardStats, gatedTransitionsFor } from "@/lib/dashboard-view";
 import { StatusChip } from "@/components/task-list-view";
 import { recentActivityForUser, timeAgo } from "@/lib/activity-view";
+import { openPipelineValue, currencySymbol } from "@/lib/crm-view";
 
 // Ported from the prototype's renderDashboardView() — four stat tiles, two
 // task lists ("Your tasks" / "Awaiting your review"), and (now that a real
@@ -20,6 +21,10 @@ export function DashboardView({
   vocabTask,
   activityLog,
   onSelectTask,
+  deals,
+  dealStatusesById,
+  dealsLoaded,
+  onOpenDeals,
 }: {
   allRows: TaskRow[];
   projects: Project[];
@@ -31,6 +36,16 @@ export function DashboardView({
   vocabTask: string;
   activityLog: ActivityLogEntry[];
   onSelectTask: (id: string) => void;
+  // CRM Phase A/B leftover — the pipeline-value tiles below. Deals load
+  // client-side, once, after mount (see TasksWorkspace's own comment on why
+  // Companies/Deals aren't part of the server-rendered props everything
+  // else here is) rather than through the props above, so this needs its
+  // own small slice of that state passed down instead of deriving it from
+  // `allRows`/`statuses` the way the task-side stats do.
+  deals: Deal[];
+  dealStatusesById: Map<string, WorkflowStatus>;
+  dealsLoaded: boolean;
+  onOpenDeals: () => void;
 }) {
   const today = new Date().toISOString().slice(0, 10);
   const rowByTaskId = new Map(allRows.map((r) => [r.task.id, r]));
@@ -41,9 +56,26 @@ export function DashboardView({
   const { mine, overdue, dueSoon, awaiting } = buildDashboardStats(tasks, statuses, transitions, currentUserId, currentUserRole, today);
   const feed = recentActivityForUser(activityLog, currentUserId);
 
-  function StatTile({ label, value, tone }: { label: string; value: number; tone?: "warn" | "bad" | "info" }) {
+  // One total per currency (see openPipelineValue's own comment on why —
+  // deals in different currencies can't be summed without a conversion
+  // rate this app doesn't have), most valuable currency first so the
+  // headline number a team actually cares about leads.
+  const pipelineByCurrency = Array.from(openPipelineValue(deals, dealStatusesById).entries()).sort((a, b) => b[1] - a[1]);
+  const openDealCount = deals.filter((d) => !dealStatusesById.get(d.status_id)?.is_closed).length;
+
+  function StatTile({
+    label,
+    value,
+    tone,
+    onClick,
+  }: {
+    label: string;
+    value: number | string;
+    tone?: "warn" | "bad" | "info";
+    onClick?: () => void;
+  }) {
     return (
-      <div className={"stat-tile" + (tone ? ` stat-${tone}` : "")}>
+      <div className={"stat-tile" + (tone ? ` stat-${tone}` : "")} onClick={onClick} style={onClick ? { cursor: "pointer" } : undefined}>
         <div className="stat-value">{value}</div>
         <div className="stat-label">{label}</div>
       </div>
@@ -65,6 +97,30 @@ export function DashboardView({
         <StatTile label="Overdue" value={overdue.length} tone={overdue.length ? "bad" : undefined} />
         <StatTile label="Awaiting your review" value={awaiting.length} tone={awaiting.length ? "info" : undefined} />
       </div>
+
+      {/* A Phase A/B leftover — open pipeline value, one tile per currency
+          (see openPipelineValue's own comment on why a single sum across
+          currencies isn't attempted). Hidden entirely once Deals has
+          loaded and genuinely has nothing open, rather than showing a
+          permanent "$0" tile for an org that isn't using the CRM side at
+          all — same "don't clutter the dashboard with an empty feature"
+          call as the rest of this view already makes for its other
+          sections. Shown as its own row rather than folded into stat-row
+          above since it's a different unit (money, not a task count) and
+          arrives later (once the client-side Deals fetch resolves). */}
+      {dealsLoaded && (pipelineByCurrency.length > 0 || openDealCount > 0) && (
+        <div className="stat-row" style={{ marginTop: 10 }}>
+          <StatTile label="Open deals" value={openDealCount} tone="info" onClick={onOpenDeals} />
+          {pipelineByCurrency.map(([currency, total]) => (
+            <StatTile
+              key={currency}
+              label={`Open pipeline (${currency})`}
+              value={`${currencySymbol(currency)}${total.toLocaleString()}`}
+              onClick={onOpenDeals}
+            />
+          ))}
+        </div>
+      )}
 
       <div className="dash-columns">
         <div className="dash-col">

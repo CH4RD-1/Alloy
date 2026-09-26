@@ -9,7 +9,7 @@
 // a fetched ActivityLogEntry into display text, resolving who did it, and
 // the dashboard's "your recent activity" feed.
 
-import type { ActivityLogEntry } from "./types";
+import type { ActivityLogEntry, DealActivityLogEntry } from "./types";
 
 // One line of copy per entry, matching the prototype's activityHtml() exactly
 // (`'created this task'` / `'moved <from> → <to>'`) — the actor's name is
@@ -17,6 +17,18 @@ import type { ActivityLogEntry } from "./types";
 // template string made with its `<strong>` tag.
 export function activitySummary(entry: ActivityLogEntry, statusLabelById: Map<string, string>): string {
   if (entry.type === "created") return "created this task";
+  const from = (entry.from_status_id && statusLabelById.get(entry.from_status_id)) || "—";
+  const to = (entry.to_status_id && statusLabelById.get(entry.to_status_id)) || "—";
+  return `moved ${from} → ${to}`;
+}
+
+// Deal activity's own version of activitySummary above — "moved <from> →
+// <to>" is identical, "created" reads "created this deal" instead of "this
+// task" since DealActivityLogEntry has no other shape (a deal has no
+// stand-in for the Portal-submission path activitySummary's task
+// equivalent has to account for).
+export function dealActivitySummary(entry: DealActivityLogEntry, statusLabelById: Map<string, string>): string {
+  if (entry.type === "created") return "created this deal";
   const from = (entry.from_status_id && statusLabelById.get(entry.from_status_id)) || "—";
   const to = (entry.to_status_id && statusLabelById.get(entry.to_status_id)) || "—";
   return `moved ${from} → ${to}`;

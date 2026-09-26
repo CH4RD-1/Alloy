@@ -108,7 +108,7 @@ function BucketColumnView({
   draggingTaskId: string | null;
   onDragStartTask: (e: DragEvent<HTMLDivElement>, taskId: string) => void;
   onDragEndTask: () => void;
-  onDropTask: (taskId: string, teamId: string | null) => void;
+  onDropTask: (taskId: string, column: BucketColumn) => void;
   onSelectTask: (id: string) => void;
 }) {
   const [hover, setHover] = useState(false);
@@ -125,7 +125,7 @@ function BucketColumnView({
         e.preventDefault();
         setHover(false);
         const taskId = e.dataTransfer.getData(DRAG_MIME);
-        if (taskId) onDropTask(taskId, column.teamId);
+        if (taskId) onDropTask(taskId, column);
       }}
     >
       <div className="bucket-head">
@@ -155,11 +155,18 @@ export function BucketsView({
   vocabTask,
   vocabTeam,
   onSelectTask,
+  onPatchTasks,
 }: {
   columns: BucketColumn[];
   vocabTask: string;
   vocabTeam: string;
   onSelectTask: (id: string) => void;
+  // Optimistic patch overlay hook (see tasks-workspace.tsx's own comment on
+  // `taskPatches`) — buildBucketColumns groups by the *derived* teamName
+  // (lib/buckets-view.ts), not the raw team_id, so a dropped tile needs both
+  // patched to actually render in its new column before router.refresh()
+  // catches up.
+  onPatchTasks: (patches: Record<string, { team_id: string | null; teamName: string | null; teamColor: string | null }>) => void;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -195,15 +202,23 @@ export function BucketsView({
     document.addEventListener("mouseup", onUp);
   }
 
-  function handleDrop(taskId: string, teamId: string | null) {
+  function handleDrop(taskId: string, column: BucketColumn) {
     setDraggingTaskId(null);
     setError(null);
+    // "No team" is a display label, not a real team — a task dropped there
+    // has teamName/teamColor null, same as buildRows() derives for any task
+    // with no team_id, not the column's own name/color.
+    const teamId = column.teamId;
+    const teamName = teamId ? column.name : null;
+    const teamColor = teamId ? column.color : null;
+    onPatchTasks({ [taskId]: { team_id: teamId, teamName, teamColor } });
     startTransition(async () => {
       try {
         await updateTaskFields(taskId, { team_id: teamId });
         router.refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : `Couldn't move that ${vocabTask.toLowerCase()}.`);
+        router.refresh();
       }
     });
   }
