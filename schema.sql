@@ -677,6 +677,12 @@ create table task_objects (
   position    int not null default 0,
   content     jsonb,               -- note text, sketch data, or small kind-specific payload
   created_by  uuid references users(id) on delete set null,
+  -- Nullable-pair attribution, same convention as ticket_messages'
+  -- author_contact_id/author_user_id and activity_log's actor_contact_id/
+  -- actor_user_id — a Portal customer attaching a note/file/checklist/form
+  -- to their own ticket (see the Portal Attachments section, Phase E) has
+  -- no users row at all, so created_by alone can't record who did it.
+  created_by_contact_id uuid references contacts(id) on delete set null,
   created_at  timestamptz not null default now()
 );
 

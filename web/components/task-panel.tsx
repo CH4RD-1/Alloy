@@ -19,9 +19,11 @@ import type {
   Doc,
   TaskObject,
   TaskObjectFile,
+  TaskObjectForm,
   ChecklistItem,
   CustomFieldDef,
   FormFieldType,
+  FormTemplate,
   ActivityLogEntry,
   TicketMessage,
   TicketMessageAttachment,
@@ -54,6 +56,8 @@ import {
 } from "@/lib/actions";
 import { TaskObjects } from "@/components/task-objects";
 import { AssetIcon } from "@/components/asset-icon";
+import { isCodeAttachmentMimeType } from "@/lib/code-highlight";
+import { CodeAttachmentThumb } from "@/components/code-attachment-viewer";
 
 const LINK_TYPE_META: Record<string, { label: string; className: string }> = {
   // "blocked"/"blocks" are always stored as a mirrored pair (see addLink()
@@ -153,6 +157,8 @@ export function TaskPanel({
   taskObjects,
   checklistItemsByObject,
   taskObjectFileByObjectId,
+  taskObjectFormByObjectId,
+  formTemplates,
   customFieldDefs,
   customFieldValuesByTask,
   activityLog,
@@ -190,6 +196,8 @@ export function TaskPanel({
   taskObjects: TaskObject[];
   checklistItemsByObject: Map<string, ChecklistItem[]>;
   taskObjectFileByObjectId: Map<string, TaskObjectFile & { url: string | null }>;
+  taskObjectFormByObjectId: Map<string, TaskObjectForm>;
+  formTemplates: FormTemplate[];
   customFieldDefs: CustomFieldDef[];
   customFieldValuesByTask: Map<string, Record<string, unknown>>;
   activityLog: ActivityLogEntry[];
@@ -696,6 +704,8 @@ export function TaskPanel({
             objects={taskObjects.filter((o) => o.task_id === taskId)}
             checklistItemsByObject={checklistItemsByObject}
             taskObjectFileByObjectId={taskObjectFileByObjectId}
+            taskObjectFormByObjectId={taskObjectFormByObjectId}
+            formTemplates={formTemplates}
           />
 
           <div className="divider" />
@@ -1438,6 +1448,9 @@ function MessageAttachments({ attachments }: { attachments: (TicketMessageAttach
               <img src={a.url} alt={a.filename} className="conversation-attachment-thumb" />
             </a>
           );
+        }
+        if (isCodeAttachmentMimeType(a.mime_type)) {
+          return <CodeAttachmentThumb key={a.id} url={a.url} filename={a.filename} mimeType={a.mime_type} />;
         }
         return a.url ? (
           <a key={a.id} href={a.url} target="_blank" rel="noreferrer" className="conversation-attachment-chip">

@@ -1596,6 +1596,20 @@ textarea.text-input {
   box-shadow: var(--shadow-panel);
   cursor: zoom-out;
 }
+.code-attachment-modal {
+  width: min(720px, 90vw);
+  max-height: 85vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-panel);
+  padding: 14px;
+  cursor: default;
+}
+.conversation-code-thumb {
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
 .obj-file-generic {
   width: 52px;
   height: 52px;
@@ -1873,6 +1887,13 @@ textarea.text-input {
 }
 .obj-menu-item:hover {
   background: var(--surface-2);
+}
+.obj-menu-item-wrap {
+  position: relative;
+}
+.obj-submenu {
+  top: 0;
+  left: calc(100% + 4px);
 }
 .checklist-items {
   display: flex;
@@ -2728,6 +2749,14 @@ textarea.text-input {
   margin-right: 2px;
 }
 .ghost-btn.settings-toggle-btn.active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+/* Portal "editor below the chat" toggle buttons (Sketch/Code —
+   components/portal-ticket-view.tsx) — same open/active treatment as the
+   settings toggle above. */
+.ghost-btn.small-btn.active {
   color: var(--text);
   border-color: var(--accent);
   background: var(--accent-soft);

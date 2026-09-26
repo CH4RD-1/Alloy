@@ -20,6 +20,7 @@ import type {
   Doc,
   TaskObject,
   TaskObjectFile,
+  TaskObjectForm,
   ChecklistItem,
   FormTemplate,
   Asset,
@@ -186,6 +187,7 @@ export function TasksWorkspace({
   taskObjects,
   checklistItemsByObject,
   taskObjectFileByObjectId,
+  taskObjectFormByObjectId,
   formTemplates,
   formTemplateUsage,
   assets,
@@ -229,6 +231,7 @@ export function TasksWorkspace({
   taskObjects: TaskObject[];
   checklistItemsByObject: Map<string, ChecklistItem[]>;
   taskObjectFileByObjectId: Map<string, TaskObjectFile & { url: string | null }>;
+  taskObjectFormByObjectId: Map<string, TaskObjectForm>;
   formTemplates: FormTemplate[];
   formTemplateUsage: Map<string, number>;
   assets: Asset[];
@@ -788,6 +791,8 @@ export function TasksWorkspace({
           taskObjects={taskObjects}
           checklistItemsByObject={checklistItemsByObject}
           taskObjectFileByObjectId={taskObjectFileByObjectId}
+          taskObjectFormByObjectId={taskObjectFormByObjectId}
+          formTemplates={formTemplates}
           customFieldDefs={customFieldDefs}
           customFieldValuesByTask={customFieldValuesByTask}
           activityLog={activityLog}

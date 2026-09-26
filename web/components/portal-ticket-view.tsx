@@ -4,6 +4,9 @@ import { useState, useTransition } from "react";
 import { addPortalTicketReply, attachPortalTicketMessageFile } from "@/lib/actions";
 import { firstResponseTarget, resolutionTarget, formatDuration } from "@/lib/sla";
 import { StatusChip } from "@/components/task-list-view";
+import { isCodeAttachmentMimeType } from "@/lib/code-highlight";
+import { CodeAttachmentThumb } from "@/components/code-attachment-viewer";
+import { SketchComposer, CodeComposer } from "@/components/chat-editors";
 
 export interface PortalTicket {
   taskId: string;
@@ -43,6 +46,7 @@ export function PortalTicketView({ ticket, token }: { ticket: PortalTicket; toke
   const [draftFiles, setDraftFiles] = useState<File[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState(ticket.messages);
+  const [openEditor, setOpenEditor] = useState<"sketch" | "code" | null>(null);
 
   function submit() {
     const body = draft.trim();
@@ -66,6 +70,39 @@ export function PortalTicketView({ ticket, token }: { ticket: PortalTicket; toke
         setDraftFiles([]);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Something went wrong sending that.");
+      }
+    });
+  }
+
+  // Posting a sketch or code block from the editor bar below the chat is its
+  // own message rather than another staged file on the reply draft — "Post"
+  // reads as immediate, matching the sketch pad's own "Save image" ->
+  // "Post" rename the user asked for. Unlike a staged file's attachments
+  // (left empty until the next revalidation — see submit()'s own comment),
+  // this uses a local object URL as the attachment's `url` right away, since
+  // seeing the thumbnail land in the chat immediately is the whole point.
+  function postAttachment(file: File) {
+    setError(null);
+    startTransition(async () => {
+      try {
+        const messageId = await addPortalTicketReply(token, "");
+        const formData = new FormData();
+        formData.append("file", file);
+        await attachPortalTicketMessageFile(token, messageId, formData);
+        const previewUrl = URL.createObjectURL(file);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `local-${Date.now()}`,
+            direction: "inbound" as const,
+            body: "",
+            createdAt: new Date().toISOString(),
+            attachments: [{ id: `local-attachment-${Date.now()}`, filename: file.name, mimeType: file.type || null, sizeBytes: file.size, url: previewUrl }],
+          },
+        ]);
+        setOpenEditor(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Something went wrong posting that.");
       }
     });
   }
@@ -180,6 +217,27 @@ export function PortalTicketView({ ticket, token }: { ticket: PortalTicket; toke
       >
         {pending ? "Sending…" : "Send reply"}
       </button>
+
+      <div className="obj-add-row" style={{ marginTop: 10, display: "flex", gap: 6 }}>
+        <button
+          type="button"
+          className={`ghost-btn small-btn ${openEditor === "sketch" ? "active" : ""}`}
+          onClick={() => setOpenEditor((v) => (v === "sketch" ? null : "sketch"))}
+          disabled={pending}
+        >
+          🖊 Sketch
+        </button>
+        <button
+          type="button"
+          className={`ghost-btn small-btn ${openEditor === "code" ? "active" : ""}`}
+          onClick={() => setOpenEditor((v) => (v === "code" ? null : "code"))}
+          disabled={pending}
+        >
+          {"</>"} Code
+        </button>
+      </div>
+      {openEditor === "sketch" && <SketchComposer pending={pending} onPost={postAttachment} onCancel={() => setOpenEditor(null)} />}
+      {openEditor === "code" && <CodeComposer pending={pending} onPost={postAttachment} onCancel={() => setOpenEditor(null)} />}
     </div>
   );
 }
@@ -205,6 +263,9 @@ function PortalMessageAttachments({
               <img src={a.url} alt={a.filename} className="conversation-attachment-thumb" />
             </a>
           );
+        }
+        if (isCodeAttachmentMimeType(a.mimeType)) {
+          return <CodeAttachmentThumb key={a.id} url={a.url} filename={a.filename} mimeType={a.mimeType} />;
         }
         return a.url ? (
           <a key={a.id} href={a.url} target="_blank" rel="noreferrer" className="conversation-attachment-chip">

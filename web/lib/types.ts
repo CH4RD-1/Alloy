@@ -437,13 +437,12 @@ export interface Doc {
 }
 
 // "note"/"checklist"/"file"/"sketch" are all created and rendered from the
-// task panel's own add-menu now. "form" is a special case: a task_object
-// with this kind is created only by the Portal's submitPortalRequest
-// service-role flow (see lib/actions.ts) when a customer submits a request
-// through a form template — there's no in-panel "add a form" option, and
-// the task panel doesn't render an existing form-kind object's answers yet
-// (it falls back to the generic "not supported" stub) — a real, separate
-// gap from file/sketch, not part of this pass.
+// task panel's own add-menu now. "form" now also has a real add-menu entry
+// and a rendered FormCard (see components/task-objects.tsx) — a template is
+// picked from the org's own form_templates and its answers stored in
+// task_object_forms, same table submitPortalRequest's own auto-created
+// "form" object already used; the two just differ in who's filling it in
+// and when.
 export type TaskObjectKind = "note" | "file" | "sketch" | "checklist" | "form" | "code";
 
 export interface TaskObject {
@@ -459,6 +458,24 @@ export interface TaskObject {
   // lib/code-highlight.ts).
   content: { text?: string; code?: string; language?: string } | null;
   created_by: string | null;
+  // Nullable-pair attribution alongside created_by — see this column's own
+  // comment in schema.sql. Set only for an object a Portal customer created
+  // directly on their own ticket (the new Portal Attachments section);
+  // every staff-created object leaves this null the way it always has.
+  created_by_contact_id: string | null;
+  created_at: string;
+}
+
+// A form-kind task_object's answers — task_object_forms is a separate
+// table (schema.sql), fetched and mapped by task_object_id the same way
+// taskObjectFileByObjectId already maps task_object_files.
+export interface TaskObjectForm {
+  id: string;
+  task_object_id: string;
+  form_template_id: string;
+  values: Record<string, string>;
+  submitted_by_contact_id: string | null;
+  submitted_by_user_id: string | null;
   created_at: string;
 }
 

@@ -15,6 +15,7 @@ import type {
   Doc,
   TaskObject,
   TaskObjectFile,
+  TaskObjectForm,
   ChecklistItem,
   FormTemplate,
   CustomFieldDef,
@@ -97,6 +98,10 @@ export interface WorkspaceData {
   // `url` is a short-lived (1hr) signed URL, generated fresh on every
   // workspace load since the bucket is private (see lib/storage.ts).
   taskObjectFileByObjectId: Map<string, TaskObjectFile & { url: string | null }>;
+  // One entry per "form" task_object — its picked template + whatever
+  // answers have been saved so far (empty {} until the first save). See
+  // lib/types.ts's TaskObjectForm.
+  taskObjectFormByObjectId: Map<string, TaskObjectForm>;
   formTemplates: FormTemplate[];
   formTemplateUsage: Map<string, number>;
   customFieldDefs: CustomFieldDef[];
@@ -289,6 +294,18 @@ export async function getWorkspaceData(userId: string): Promise<WorkspaceData | 
     });
   }
 
+  // "form" objects (see lib/types.ts's TaskObject/TaskObjectForm) — every
+  // Portal-originated submission already created one of these, but nothing
+  // read task_object_forms back until now (only a usage-count query in
+  // getFormTemplateUsage below). Needed for both the internal FormCard and,
+  // via the same shape, the new Portal Attachments section.
+  const formObjectIds = (taskObjects ?? []).filter((o) => o.kind === "form").map((o) => o.id);
+  const taskObjectFormByObjectId = new Map<string, TaskObjectForm>();
+  if (formObjectIds.length) {
+    const { data: formRows } = await supabase.from("task_object_forms").select("*").in("task_object_id", formObjectIds);
+    (formRows ?? []).forEach((row: any) => taskObjectFormByObjectId.set(row.task_object_id, row as TaskObjectForm));
+  }
+
   const messageIds = (ticketMessages ?? []).map((m) => m.id);
   const ticketMessageAttachmentsByMessageId = new Map<string, (TicketMessageAttachment & { url: string | null })[]>();
   if (messageIds.length) {
@@ -427,6 +444,7 @@ export async function getWorkspaceData(userId: string): Promise<WorkspaceData | 
     taskObjects: (taskObjects ?? []) as TaskObject[],
     checklistItemsByObject,
     taskObjectFileByObjectId,
+    taskObjectFormByObjectId,
     formTemplates: (formTemplates ?? []) as FormTemplate[],
     formTemplateUsage,
     customFieldDefs: (customFieldDefs ?? []) as CustomFieldDef[],

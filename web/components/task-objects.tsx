@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState, useTransition } from "react";
-import type { ChangeEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
+import type { ChangeEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
-import type { TaskObject, ChecklistItem, TaskObjectFile } from "@/lib/types";
+import type { TaskObject, ChecklistItem, TaskObjectFile, TaskObjectForm, FormTemplate } from "@/lib/types";
 import {
   createTaskObject,
   createFileTaskObject,
@@ -15,33 +15,42 @@ import {
   addChecklistItem,
   updateChecklistItem,
   removeChecklistItem,
+  createFormTaskObject,
+  updateTaskObjectFormValues,
 } from "@/lib/actions";
 import { CODE_LANGUAGES, highlightCode } from "@/lib/code-highlight";
+import { DateGuideField } from "@/components/date-guide-field";
+import { SketchCanvas } from "@/components/sketch-canvas";
 
 type FileWithUrl = TaskObjectFile & { url: string | null };
 
 // Task-panel "Attachments" — ported from the prototype's obj-card / obj-menu
 // system. Text notes and checklists were the first two kinds ported (they
-// need no file storage); this pass adds the other two the add-menu always
-// offered: real Supabase Storage-backed file uploads and a canvas sketch
-// pad. "form" still isn't rendered here — see the TaskObjectKind comment in
-// lib/types.ts for why that one's a separate, later gap.
+// need no file storage); a later pass added real Supabase Storage-backed
+// file uploads and a canvas sketch pad. This pass adds "form" — a picked
+// form_templates row filled in from the task panel (FormCard below), the
+// staff-side twin of submitPortalRequest's own auto-created "form" object.
 export function TaskObjects({
   taskId,
   orgId,
   objects,
   checklistItemsByObject,
   taskObjectFileByObjectId,
+  taskObjectFormByObjectId,
+  formTemplates,
 }: {
   taskId: string;
   orgId: string;
   objects: TaskObject[];
   checklistItemsByObject: Map<string, ChecklistItem[]>;
   taskObjectFileByObjectId: Map<string, FileWithUrl>;
+  taskObjectFormByObjectId: Map<string, TaskObjectForm>;
+  formTemplates: FormTemplate[];
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [formMenuOpen, setFormMenuOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewingImage, setViewingImage] = useState<{ src: string; name: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -60,11 +69,19 @@ export function TaskObjects({
 
   function addObject(kind: "note" | "checklist" | "sketch" | "code") {
     setMenuOpen(false);
+    setFormMenuOpen(false);
     run(() => createTaskObject(orgId, taskId, kind));
+  }
+
+  function addForm(templateId: string) {
+    setMenuOpen(false);
+    setFormMenuOpen(false);
+    run(() => createFormTaskObject(orgId, taskId, templateId));
   }
 
   function triggerFileUpload() {
     setMenuOpen(false);
+    setFormMenuOpen(false);
     fileInputRef.current?.click();
   }
 
@@ -158,8 +175,20 @@ export function TaskObjects({
                 />
               );
             }
-            // "form" — created only via the Portal, not rendered in this
-            // pass. Shown as a stub rather than silently vanishing.
+            if (o.kind === "form") {
+              const form = taskObjectFormByObjectId.get(o.id);
+              const template = formTemplates.find((t) => t.id === form?.form_template_id);
+              return (
+                <FormCard
+                  key={o.id}
+                  form={form}
+                  template={template}
+                  pending={pending}
+                  onChange={(values) => run(() => updateTaskObjectFormValues(o.id, values))}
+                  onRemove={() => run(() => deleteTaskObject(o.id))}
+                />
+              );
+            }
             return (
               <div key={o.id} className="obj-card">
                 <div className="obj-card-head">
@@ -201,6 +230,26 @@ export function TaskObjects({
             <button type="button" className="obj-menu-item" onClick={() => addObject("checklist")}>
               Checklist
             </button>
+            <div className="obj-menu-item-wrap">
+              <button type="button" className="obj-menu-item" onClick={() => setFormMenuOpen((v) => !v)}>
+                Form
+              </button>
+              {formMenuOpen && (
+                <div className="obj-menu obj-submenu">
+                  {formTemplates.length === 0 ? (
+                    <span className="obj-menu-item" style={{ color: "var(--text-faint)", cursor: "default" }}>
+                      No form templates yet
+                    </span>
+                  ) : (
+                    formTemplates.map((t) => (
+                      <button key={t.id} type="button" className="obj-menu-item" onClick={() => addForm(t.id)}>
+                        {t.name}
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -454,260 +503,15 @@ function CodeCard({
   );
 }
 
-type SketchTool = "pen" | "eraser" | "fill" | "circle" | "square" | "rectangle" | "right-triangle" | "triangle" | "hexagon";
-const SHAPE_TOOLS: SketchTool[] = ["circle", "square", "rectangle", "right-triangle", "triangle", "hexagon"];
-const DRAW_TOOLS: { id: SketchTool; label: string }[] = [
-  { id: "pen", label: "Pen" },
-  { id: "eraser", label: "Eraser" },
-  { id: "fill", label: "Fill" },
-  { id: "circle", label: "Circle" },
-  { id: "square", label: "Square" },
-  { id: "rectangle", label: "Rectangle" },
-  { id: "right-triangle", label: "Right-angle triangle" },
-  { id: "triangle", label: "Equilateral triangle" },
-  { id: "hexagon", label: "Hexagon" },
-];
-const SKETCH_COLORS = ["#2b2b2b", "#e03131", "#e8590c", "#2f9e44", "#1971c2", "#7048e8", "#d6336c", "#5c4033"];
-const SKETCH_PEN_WIDTH = 2.2;
-const SKETCH_ERASER_WIDTH = 18;
-
-function SketchToolIcon({ tool }: { tool: SketchTool }) {
-  const common = {
-    width: 14,
-    height: 14,
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: 1.8,
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-  };
-  switch (tool) {
-    case "pen":
-      return (
-        <svg {...common}>
-          <path d="M12 20h9" />
-          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
-        </svg>
-      );
-    case "eraser":
-      return (
-        <svg {...common}>
-          <path d="m7 21-4.3-4.3c-.94-.94-.94-2.47 0-3.42l9.58-9.58c.94-.94 2.47-.94 3.42 0l5.3 5.3c.94.94.94 2.47 0 3.42L13 21" />
-          <path d="M22 21H7" />
-        </svg>
-      );
-    case "fill":
-      return (
-        <svg {...common}>
-          <path d="M10 3 3 10c-.6.6-.6 1.6 0 2.2l7 7c.6.6 1.6.6 2.2 0l7-7c.6-.6.6-1.6 0-2.2l-7-7c-.6-.6-1.6-.6-2.2 0Z" />
-          <path d="M3 10h16" />
-          <path d="M19 15c0 1.4-1 2.5-1 2.5s-1-1.1-1-2.5a1 1 0 0 1 2 0Z" />
-        </svg>
-      );
-    case "circle":
-      return (
-        <svg {...common}>
-          <circle cx="12" cy="12" r="8" />
-        </svg>
-      );
-    case "square":
-      return (
-        <svg {...common}>
-          <rect x="5" y="5" width="14" height="14" />
-        </svg>
-      );
-    case "rectangle":
-      return (
-        <svg {...common}>
-          <rect x="3" y="7" width="18" height="10" />
-        </svg>
-      );
-    case "right-triangle":
-      return (
-        <svg {...common}>
-          <path d="M5 5 L5 19 L19 19 Z" />
-        </svg>
-      );
-    case "triangle":
-      return (
-        <svg {...common}>
-          <path d="M12 4 L20 19 L4 19 Z" />
-        </svg>
-      );
-    case "hexagon":
-      return (
-        <svg {...common}>
-          <path d="M8 3 H16 L21 12 L16 21 H8 L3 12 Z" />
-        </svg>
-      );
-  }
-}
-
-// Draws (or previews, mid-drag) a shape tool into the given bounding box —
-// shared by both the live preview in handlePointerMove and, implicitly, the
-// final commit (the preview IS the commit: the last frame drawn before
-// pointerup is just left in place, nothing further to draw on release).
-function drawSketchShape(ctx: CanvasRenderingContext2D, tool: SketchTool, x0: number, y0: number, x1: number, y1: number, color: string) {
-  const left = Math.min(x0, x1);
-  const right = Math.max(x0, x1);
-  const top = Math.min(y0, y1);
-  const bottom = Math.max(y0, y1);
-  const w = right - left;
-  const h = bottom - top;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = SKETCH_PEN_WIDTH;
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  switch (tool) {
-    case "circle": {
-      const cx = (left + right) / 2;
-      const cy = (top + bottom) / 2;
-      ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
-      break;
-    }
-    case "square": {
-      const size = Math.max(w, h);
-      const sx = x1 >= x0 ? x0 : x0 - size;
-      const sy = y1 >= y0 ? y0 : y0 - size;
-      ctx.rect(sx, sy, size, size);
-      break;
-    }
-    case "rectangle":
-      ctx.rect(left, top, w, h);
-      break;
-    case "right-triangle":
-      // Right angle at the bounding box's bottom-left corner.
-      ctx.moveTo(left, top);
-      ctx.lineTo(left, bottom);
-      ctx.lineTo(right, bottom);
-      ctx.closePath();
-      break;
-    case "triangle":
-      // Apex centered on top, base spans the full bounding-box width —
-      // reads as equilateral for the common case of dragging a roughly
-      // square box, without needing to force the box itself into one.
-      ctx.moveTo((left + right) / 2, top);
-      ctx.lineTo(left, bottom);
-      ctx.lineTo(right, bottom);
-      ctx.closePath();
-      break;
-    case "hexagon": {
-      const cx = (left + right) / 2;
-      const cy = (top + bottom) / 2;
-      const rx = w / 2;
-      const ry = h / 2;
-      for (let i = 0; i < 6; i++) {
-        const angle = (Math.PI / 180) * (60 * i - 90);
-        const px = cx + rx * Math.cos(angle);
-        const py = cy + ry * Math.sin(angle);
-        if (i === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
-      }
-      ctx.closePath();
-      break;
-    }
-  }
-  ctx.stroke();
-}
-
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
-  const clean = hex.replace("#", "");
-  const full = clean.length === 3 ? clean.split("").map((c) => c + c).join("") : clean;
-  const num = parseInt(full, 16);
-  return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
-}
-
-// Classic stack-based paint-bucket fill: starting from the clicked pixel,
-// flood-fills every contiguous pixel that's within a small color tolerance
-// of it (a little slack rather than an exact match, so it still fills
-// cleanly right up against an antialiased pen/shape edge instead of
-// stopping a pixel short) with the current color. Cheap enough to run
-// synchronously — the canvas is a fixed 420x200, so at most ~84,000
-// pixels — so there's no need for the async/chunked flood-fill some paint
-// apps use for much larger canvases.
-function floodFillCanvas(ctx: CanvasRenderingContext2D, startX: number, startY: number, fillColor: string) {
-  const { width, height } = ctx.canvas;
-  const x0 = Math.max(0, Math.min(width - 1, Math.floor(startX)));
-  const y0 = Math.max(0, Math.min(height - 1, Math.floor(startY)));
-  const imageData = ctx.getImageData(0, 0, width, height);
-  const data = imageData.data;
-
-  const startIdx = (y0 * width + x0) * 4;
-  const startR = data[startIdx];
-  const startG = data[startIdx + 1];
-  const startB = data[startIdx + 2];
-  const startA = data[startIdx + 3];
-
-  const fill = hexToRgb(fillColor);
-  if (startR === fill.r && startG === fill.g && startB === fill.b && startA === 255) return;
-
-  const tolerance = 32;
-  const toleranceSq = tolerance * tolerance;
-  function matches(idx: number) {
-    const dr = data[idx] - startR;
-    const dg = data[idx + 1] - startG;
-    const db = data[idx + 2] - startB;
-    const da = data[idx + 3] - startA;
-    return dr * dr + dg * dg + db * db + da * da <= toleranceSq;
-  }
-
-  const visited = new Uint8Array(width * height);
-  const stackX: number[] = [x0];
-  const stackY: number[] = [y0];
-  while (stackX.length) {
-    const x = stackX.pop() as number;
-    const y = stackY.pop() as number;
-    if (x < 0 || x >= width || y < 0 || y >= height) continue;
-    const pixelPos = y * width + x;
-    if (visited[pixelPos]) continue;
-    const idx = pixelPos * 4;
-    if (!matches(idx)) continue;
-    visited[pixelPos] = 1;
-    data[idx] = fill.r;
-    data[idx + 1] = fill.g;
-    data[idx + 2] = fill.b;
-    data[idx + 3] = 255;
-    stackX.push(x + 1, x - 1, x, x);
-    stackY.push(y, y, y + 1, y - 1);
-  }
-
-  ctx.putImageData(imageData, 0, 0);
-}
-
-// A React port of the prototype's raw-DOM initSketchCanvases(): pointer
-// events drawn straight onto a fixed 420x200 canvas, saved on every stroke
-// end. Drawing state (drawing/lastX/lastY/shapeStart) lives in refs, not
-// state, so a mid-stroke pointermove never triggers a re-render. "Clear
-// sketch" reuses the exact same save pathway with a blanked canvas rather
-// than a separate delete action, so Storage stays in sync with no new
-// server action needed.
-//
-// Beyond the original port: an eraser (destination-out compositing, so it
-// genuinely punches a hole back to whatever's underneath rather than
-// having to paint over in the exact background color), a basic color
-// palette, and six shape tools (drag to size, release to commit — a
-// snapshot of the canvas taken on pointerdown is restored on every
-// pointermove before redrawing the preview, so dragging a shape around
-// doesn't smear copies of it across the canvas).
-//
-// Also fixes a real, reported bug, not just adds features: freehand
-// strokes could drop line segments mid-stroke. Root cause was
-// onPointerLeave ending the stroke — with the canvas already holding
-// pointer capture (setPointerCapture below), a fast stroke briefly
-// crossing the canvas's own edge can still fire a pointerleave in some
-// browsers even though the capture means pointermove/pointerup keep
-// arriving correctly; ending the stroke right then silently drew nothing
-// for the rest of that same physical drag. Removed — only a genuine
-// pointerup/pointercancel ends a stroke now. Separately, a very fast
-// stroke can generate more physical mouse-movement than individual
-// pointermove events for — most browsers batch ("coalesce") the skipped
-// points into the next event rather than dropping them outright, but the
-// original code only ever drew a line to the event's own final point, so
-// those in-between points, and the line segments through them, never got
-// drawn. getCoalescedEvents() (guarded, since it's not universally
-// implemented) recovers and draws through all of them.
+// The drawing engine (toolbar, canvas, pointer handling, undo/clear) lives
+// in components/sketch-canvas.tsx now — pulled out so SketchComposer
+// (components/chat-editors.tsx, the Portal's below-the-chat scratchpad) can
+// share the exact same tools/shapes/fill/undo rather than a re-implementation
+// that could quietly drift from this one. This card just wires that shared
+// engine to this object's own persistence: autosave on every commit
+// (onSaved) plus a "Save as image" primary action that flips the object's
+// kind server-side (onSaveAsImage) — see saveSketchAsImage's own comment in
+// lib/actions.ts.
 function SketchCard({
   file,
   pending,
@@ -721,169 +525,10 @@ function SketchCard({
   onSaved: (formData: FormData) => void;
   onSaveAsImage: (formData: FormData) => void;
 }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const drawing = useRef(false);
-  const last = useRef({ x: 0, y: 0 });
-  const shapeStart = useRef<{ x: number; y: number; snapshot: ImageData } | null>(null);
-  // A single snapshot of the canvas taken right before the most recent
-  // committed action (a stroke, a shape, a fill, or a clear) — not a full
-  // undo stack, just the one the user asked for: "single undo the last
-  // action". Undoing consumes it (canUndo goes false again) rather than
-  // supporting redo or multiple undos.
-  const undoSnapshot = useRef<ImageData | null>(null);
-  const [tool, setTool] = useState<SketchTool>("pen");
-  const [color, setColor] = useState(SKETCH_COLORS[0]);
-  const [canUndo, setCanUndo] = useState(false);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-    ctx.fillStyle = "#FBFAF7";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    if (file?.url) {
-      const img = new Image();
-      // The signed-URL GET needs permissive CORS for this canvas to stay
-      // un-tainted (so a later stroke-end toBlob() can still read pixels
-      // back out) — Supabase Storage sends the necessary header.
-      img.crossOrigin = "anonymous";
-      img.onload = () => ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      img.src = file.url;
-    }
-    // Intentionally re-runs only when the loaded image actually changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file?.url]);
-
-  function pos(e: ReactPointerEvent<HTMLCanvasElement> | PointerEvent) {
-    const canvas = canvasRef.current as HTMLCanvasElement;
-    const r = canvas.getBoundingClientRect();
-    return { x: (e.clientX - r.left) * (canvas.width / r.width), y: (e.clientY - r.top) * (canvas.height / r.height) };
-  }
-
-  function handlePointerDown(e: ReactPointerEvent<HTMLCanvasElement>) {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-    const p = pos(e);
-
-    // Fill is a single click/tap action, not a drag — commit it right
-    // here and return, same as clearSketch, rather than joining the
-    // drawing.current drag machinery below.
-    if (tool === "fill") {
-      undoSnapshot.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      setCanUndo(true);
-      ctx.globalCompositeOperation = "source-over";
-      floodFillCanvas(ctx, p.x, p.y, color);
-      saveCanvas();
-      return;
-    }
-
-    drawing.current = true;
-    canvas.setPointerCapture(e.pointerId);
-    undoSnapshot.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    setCanUndo(true);
-
-    if (tool === "pen" || tool === "eraser") {
-      last.current = p;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = tool === "eraser" ? SKETCH_ERASER_WIDTH : SKETCH_PEN_WIDTH;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.globalCompositeOperation = tool === "eraser" ? "destination-out" : "source-over";
-      // A dot on its own so a single tap/click registers as a mark, not
-      // nothing — matches the prototype's own pointerdown handler.
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, ctx.lineWidth / 2, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-    } else {
-      ctx.globalCompositeOperation = "source-over";
-      // Reuses the same pre-stroke snapshot just captured for undo — it's
-      // an untouched copy of the canvas either way, so there's no reason
-      // to call getImageData a second time for the shape-preview restore.
-      shapeStart.current = { x: p.x, y: p.y, snapshot: undoSnapshot.current };
-    }
-  }
-
-  function handlePointerMove(e: ReactPointerEvent<HTMLCanvasElement>) {
-    if (!drawing.current) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-
-    if (tool === "pen" || tool === "eraser") {
-      const native = e.nativeEvent as PointerEvent & { getCoalescedEvents?: () => PointerEvent[] };
-      const points = native.getCoalescedEvents?.() ?? [native];
-      for (const point of points) {
-        const p = pos(point);
-        ctx.beginPath();
-        ctx.moveTo(last.current.x, last.current.y);
-        ctx.lineTo(p.x, p.y);
-        ctx.stroke();
-        last.current = p;
-      }
-    } else if (shapeStart.current) {
-      ctx.putImageData(shapeStart.current.snapshot, 0, 0);
-      const p = pos(e);
-      drawSketchShape(ctx, tool, shapeStart.current.x, shapeStart.current.y, p.x, p.y, color);
-    }
-  }
-
-  function saveCanvas() {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const formData = new FormData();
-      formData.append("file", blob, "sketch.png");
-      onSaved(formData);
-    }, "image/png");
-  }
-
-  function endStroke() {
-    if (!drawing.current) return;
-    drawing.current = false;
-    shapeStart.current = null;
-    saveCanvas();
-  }
-
-  function clearSketch() {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-    undoSnapshot.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    setCanUndo(true);
-    ctx.globalCompositeOperation = "source-over";
-    ctx.fillStyle = "#FBFAF7";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    saveCanvas();
-  }
-
-  function handleUndo() {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx || !undoSnapshot.current) return;
-    ctx.putImageData(undoSnapshot.current, 0, 0);
-    undoSnapshot.current = null;
-    setCanUndo(false);
-    saveCanvas();
-  }
-
-  // Converts the sketch into a plain image attachment: one last save of
-  // the current canvas, then the object's kind flips server-side from
-  // "sketch" to "file" — see saveSketchAsImage's own comment in
-  // lib/actions.ts. From the next data refresh on, TaskObjects renders
-  // this object with FileCard instead of SketchCard, so this really does
-  // replace the sketch pad completely, as asked for.
-  function saveAsImage() {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const formData = new FormData();
-      formData.append("file", blob, "sketch.png");
-      onSaveAsImage(formData);
-    }, "image/png");
+  function toFormData(blob: Blob): FormData {
+    const formData = new FormData();
+    formData.append("file", blob, "sketch.png");
+    return formData;
   }
 
   return (
@@ -894,72 +539,16 @@ function SketchCard({
           ✕
         </button>
       </div>
-      <div className="sketch-toolbar">
-        {DRAW_TOOLS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            className={`sketch-tool-btn ${tool === t.id ? "active" : ""}`}
-            onClick={() => setTool(t.id)}
-            title={t.label}
-            aria-label={t.label}
-          >
-            <SketchToolIcon tool={t.id} />
-          </button>
-        ))}
-        <span className="sketch-toolbar-divider" />
-        <div className="sketch-colors">
-          {SKETCH_COLORS.map((c) => (
-            <button
-              key={c}
-              type="button"
-              className={`sketch-color-swatch ${color === c ? "active" : ""}`}
-              style={{ background: c }}
-              onClick={() => setColor(c)}
-              title={c}
-              aria-label={`Color ${c}`}
-            />
-          ))}
-          <input
-            type="color"
-            className="sketch-color-custom"
-            value={color}
-            onChange={(e) => setColor(e.target.value)}
-            title="Custom color"
-            aria-label="Custom color"
-          />
-        </div>
-      </div>
-      <div className="sketch-frame">
-        <canvas
-          ref={canvasRef}
-          className="sketch-canvas"
-          width={420}
-          height={200}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={endStroke}
-          onPointerCancel={endStroke}
-        />
-      </div>
-      <div className="sketch-actions">
-        <button type="button" className="small-btn ghost-btn" onClick={clearSketch} disabled={pending}>
-          Clear sketch
-        </button>
-        <button type="button" className="small-btn ghost-btn" onClick={handleUndo} disabled={pending || !canUndo} title="Undo the last action">
-          Undo
-        </button>
-        <button
-          type="button"
-          className="small-btn"
-          style={{ marginLeft: "auto" }}
-          onClick={saveAsImage}
-          disabled={pending}
-          title="Replace this sketch pad with a saved PNG image"
-        >
-          Save as image
-        </button>
-      </div>
+      <SketchCanvas
+        initialImageUrl={file?.url}
+        disabled={pending}
+        onCommit={(blob) => onSaved(toFormData(blob))}
+        primaryAction={{
+          label: "Save as image",
+          title: "Replace this sketch pad with a saved PNG image",
+          onClick: (blob) => onSaveAsImage(toFormData(blob)),
+        }}
+      />
     </div>
   );
 }
@@ -1040,6 +629,129 @@ function ChecklistCard({
           }}
         />
       </div>
+    </div>
+  );
+}
+
+// Same per-field-type input set as PortalRequestForm's own template render
+// (select/paragraph/number/date/yes_no/text), kept in sync with that one —
+// both ultimately fill in the same task_object_forms.values shape, just from
+// different sides (staff here, a Portal customer there). Locally controlled
+// so a select/checkbox/date click saves immediately the way CustomFieldControl
+// does, while free-text fields save on blur like NoteCard's textarea; either
+// way `values` is kept in sync with the object's own saved state via the
+// effect below, in case a concurrent edit lands on refresh.
+function FormCard({
+  form,
+  template,
+  pending,
+  onChange,
+  onRemove,
+}: {
+  form: TaskObjectForm | undefined;
+  template: FormTemplate | undefined;
+  pending: boolean;
+  onChange: (values: Record<string, string>) => void;
+  onRemove: () => void;
+}) {
+  const [values, setValues] = useState<Record<string, string>>(form?.values ?? {});
+
+  useEffect(() => {
+    setValues(form?.values ?? {});
+  }, [form?.values]);
+
+  function save(next: Record<string, string>) {
+    setValues(next);
+    onChange(next);
+  }
+
+  if (!template) {
+    return (
+      <div className="obj-card">
+        <div className="obj-card-head">
+          <span className="obj-type-label">Form</span>
+          <button className="icon-btn" onClick={onRemove} disabled={pending} title="Remove">
+            ✕
+          </button>
+        </div>
+        <p style={{ color: "var(--text-faint)", fontSize: 12 }}>This form&apos;s template no longer exists.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="obj-card">
+      <div className="obj-card-head">
+        <span className="obj-type-label">Form — {template.name}</span>
+        <button className="icon-btn" onClick={onRemove} disabled={pending} title="Remove">
+          ✕
+        </button>
+      </div>
+      {template.fields.length === 0 ? (
+        <p className="crumbline">This template has no fields yet.</p>
+      ) : (
+        template.fields.map((f) => (
+          <div key={f.id} className="field-group">
+            <span className="field-label">{f.label}</span>
+            {f.type === "select" ? (
+              <select
+                className="select-input"
+                disabled={pending}
+                value={values[f.id] ?? ""}
+                onChange={(e) => save({ ...values, [f.id]: e.target.value })}
+              >
+                <option value="">—</option>
+                {(f.options ?? []).map((o) => (
+                  <option key={o} value={o}>
+                    {o}
+                  </option>
+                ))}
+              </select>
+            ) : f.type === "paragraph" ? (
+              <textarea
+                className="text-input"
+                disabled={pending}
+                defaultValue={values[f.id] ?? ""}
+                onBlur={(e) => {
+                  if (e.target.value !== (values[f.id] ?? "")) save({ ...values, [f.id]: e.target.value });
+                }}
+              />
+            ) : f.type === "number" ? (
+              <input
+                className="text-input mono"
+                type="number"
+                disabled={pending}
+                defaultValue={values[f.id] ?? ""}
+                onBlur={(e) => {
+                  if (e.target.value !== (values[f.id] ?? "")) save({ ...values, [f.id]: e.target.value });
+                }}
+              />
+            ) : f.type === "date" ? (
+              <DateGuideField value={values[f.id] ?? ""} onChange={(v) => save({ ...values, [f.id]: v })} />
+            ) : f.type === "yes_no" ? (
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  disabled={pending}
+                  checked={values[f.id] === "true"}
+                  onChange={(e) => save({ ...values, [f.id]: e.target.checked ? "true" : "false" })}
+                />
+                <span style={{ fontSize: 12.5, color: "var(--text-muted)" }}>{values[f.id] === "true" ? "Yes" : "No"}</span>
+              </label>
+            ) : (
+              <input
+                className="text-input"
+                type="text"
+                disabled={pending}
+                defaultValue={values[f.id] ?? ""}
+                onBlur={(e) => {
+                  if (e.target.value !== (values[f.id] ?? "")) save({ ...values, [f.id]: e.target.value });
+                }}
+              />
+            )}
+          </div>
+        ))
+      )}
     </div>
   );
 }

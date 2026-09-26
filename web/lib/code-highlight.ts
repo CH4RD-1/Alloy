@@ -82,6 +82,29 @@ export const CODE_LANGUAGES: { value: string; label: string }[] = [
   { value: "plaintext", label: "Plain text" },
 ];
 
+// A "code block posted to the chat" (SketchComposer's sibling, CodeComposer
+// — see components/code-attachment-viewer.tsx) isn't its own task_object;
+// it's an ordinary ticket_message_attachments file row like any upload,
+// tagged with this synthetic mime_type so MessageAttachments/
+// PortalMessageAttachments can tell it apart from a real file and render a
+// code thumbnail instead of a download chip. mime_type is a free-text
+// column with no db constraint, so this needs no schema change — just a
+// convention both the poster and the two renderers agree on.
+export const CODE_ATTACHMENT_MIME_PREFIX = "text/x-code+";
+
+export function buildCodeAttachmentMimeType(language: string): string {
+  return `${CODE_ATTACHMENT_MIME_PREFIX}${language || "plaintext"}`;
+}
+
+export function isCodeAttachmentMimeType(mimeType: string | null | undefined): boolean {
+  return !!mimeType && mimeType.startsWith(CODE_ATTACHMENT_MIME_PREFIX);
+}
+
+export function parseCodeAttachmentLanguage(mimeType: string | null | undefined): string {
+  if (!isCodeAttachmentMimeType(mimeType)) return "plaintext";
+  return (mimeType as string).slice(CODE_ATTACHMENT_MIME_PREFIX.length) || "plaintext";
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

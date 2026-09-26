@@ -1,0 +1,21 @@
+-- ============================================================================
+-- Alloy — task_objects Portal-contact attribution patch
+-- ============================================================================
+-- Run this once against your EXISTING database (Studio -> SQL editor).
+-- Safe to run more than once — the column add is guarded with
+-- if not exists.
+--
+-- Adds:
+--   task_objects.created_by_contact_id — nullable FK to contacts, same
+--     nullable-pair attribution convention as ticket_messages'
+--     author_contact_id/author_user_id and activity_log's actor_contact_id/
+--     actor_user_id. Needed now that a Portal customer can attach a note/
+--     file/checklist/form to their own ticket directly (see the new Portal
+--     Attachments section) — task_objects.created_by alone can't record
+--     that, since a Portal contact has no corresponding users row at all.
+--
+-- See lib/actions.ts's new Portal-side task-object actions and
+-- components/portal-attachments.tsx for the app-side half of this.
+-- ============================================================================
+
+alter table task_objects add column if not exists created_by_contact_id uuid references contacts(id) on delete set null;

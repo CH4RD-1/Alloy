@@ -759,9 +759,13 @@ export async function unlinkDocFromTask(docId: string, taskId: string) {
 }
 
 // ----------------------------------------------------------------------
-// Task-panel objects (attachments): notes, checklists, files and sketches.
-// "form" isn't here — see the TaskObjectKind comment in lib/types.ts for why
-// that one's created only through the Portal's submitPortalRequest flow.
+// Task-panel objects (attachments): notes, checklists, files, sketches,
+// code blocks, and now forms too (createFormTaskObject/
+// updateTaskObjectFormValues below) — a template picked from the org's own
+// form_templates, filled in from the task panel. Shares task_object_forms
+// with submitPortalRequest's own auto-created "form" object (a customer's
+// original submission answers); the two differ only in who fills it in and
+// when, not in shape.
 // ----------------------------------------------------------------------
 
 export async function createTaskObject(orgId: string, taskId: string, kind: "note" | "checklist" | "sketch" | "code"): Promise<string> {
@@ -808,6 +812,52 @@ export async function updateNoteText(objectId: string, text: string) {
 export async function updateCodeBlock(objectId: string, code: string, language: string) {
   const { supabase } = await requireUser();
   const { error } = await supabase.from("task_objects").update({ content: { code, language } }).eq("id", objectId);
+  if (error) throw new Error(error.message);
+  revalidatePath("/dashboard");
+}
+
+// Attaches a form template to a task/ticket from the staff-side task panel —
+// the "form" object's twin creation path alongside submitPortalRequest's own
+// auto-created one. Staff can pick ANY of the org's templates (no
+// portal_visible filter — that flag only gates what a Portal customer sees).
+// The task_object_forms row starts with empty values ({}) rather than
+// prefilled defaults; FormCard fills them in and saves via
+// updateTaskObjectFormValues below.
+export async function createFormTaskObject(orgId: string, taskId: string, formTemplateId: string): Promise<string> {
+  const { supabase, user } = await requireUser();
+  const { data: existing } = await supabase
+    .from("task_objects")
+    .select("position")
+    .eq("task_id", taskId)
+    .order("position", { ascending: false })
+    .limit(1);
+  const nextPosition = existing && existing.length ? existing[0].position + 1 : 0;
+
+  const { data: object, error: objectError } = await supabase
+    .from("task_objects")
+    .insert({ org_id: orgId, task_id: taskId, kind: "form", position: nextPosition, content: null, created_by: user.id })
+    .select("id")
+    .single();
+  if (objectError) throw new Error(objectError.message);
+
+  const { error: formError } = await supabase.from("task_object_forms").insert({
+    task_object_id: object.id,
+    form_template_id: formTemplateId,
+    values: {},
+    submitted_by_user_id: user.id,
+  });
+  if (formError) {
+    await supabase.from("task_objects").delete().eq("id", object.id);
+    throw new Error(formError.message);
+  }
+
+  revalidatePath("/dashboard");
+  return object.id as string;
+}
+
+export async function updateTaskObjectFormValues(taskObjectId: string, values: Record<string, string>) {
+  const { supabase } = await requireUser();
+  const { error } = await supabase.from("task_object_forms").update({ values }).eq("task_object_id", taskObjectId);
   if (error) throw new Error(error.message);
   revalidatePath("/dashboard");
 }

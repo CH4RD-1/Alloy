@@ -60,6 +60,7 @@ export default async function DashboardPage() {
         taskObjects={data.taskObjects}
         checklistItemsByObject={data.checklistItemsByObject}
         taskObjectFileByObjectId={data.taskObjectFileByObjectId}
+        taskObjectFormByObjectId={data.taskObjectFormByObjectId}
         formTemplates={data.formTemplates}
         formTemplateUsage={data.formTemplateUsage}
         assets={data.assets}
