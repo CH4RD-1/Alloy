@@ -2906,3 +2906,32 @@ button.cal-daycell-bg {
     grid-template-columns: 1fr;
   }
 }
+
+/* Flow chart drag-to-link (WorkflowFlowChart in workflow-panel.tsx) — same
+   idea as gantt-view.tsx's own .gantt-link-node/.gantt-link-preview pair,
+   just 4 handles per state box instead of 1 per bar. */
+.wf-flow-handle {
+  fill: var(--surface);
+  stroke: var(--text-faint);
+  stroke-width: 1.5;
+  opacity: 0.4;
+  cursor: crosshair;
+}
+.wf-flow-handle:hover {
+  opacity: 1;
+  stroke: var(--accent);
+}
+.wf-flow-link-preview {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 5 3;
+  fill: none;
+  pointer-events: none;
+}
+.wf-flow-node-target rect {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+.wf-flow-edge-hit {
+  cursor: pointer;
+}
