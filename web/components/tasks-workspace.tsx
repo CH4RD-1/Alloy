@@ -49,7 +49,9 @@ import { CompaniesView } from "@/components/companies-view";
 import { CompanyPanel } from "@/components/company-panel";
 import { DealsView } from "@/components/deals-view";
 import { DealPanel } from "@/components/deal-panel";
-import { getCompaniesData, getDealsData } from "@/lib/actions";
+import { ContactsView } from "@/components/contacts-view";
+import { ContactPanel } from "@/components/contact-panel";
+import { getCompaniesData, getDealsData, getOrgContactsData } from "@/lib/actions";
 import { DashboardView } from "@/components/dashboard-view";
 import { ProjectsPanel } from "@/components/projects-panel";
 import { TeamsPanel } from "@/components/teams-panel";
@@ -139,8 +141,18 @@ function DealsIcon() {
     </svg>
   );
 }
+// CRM Phase C — a plain person glyph for the new Contacts tab, same small
+// inline style as CompaniesIcon/DealsIcon just above.
+function ContactsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8" />
+    </svg>
+  );
+}
 
-type ViewKey = "dashboard" | "list" | "buckets" | "gantt" | "calendar" | "kb" | "assets" | "companies" | "deals";
+type ViewKey = "dashboard" | "list" | "buckets" | "gantt" | "calendar" | "kb" | "assets" | "companies" | "deals" | "contacts";
 
 export function TasksWorkspace({
   rows,
@@ -253,9 +265,13 @@ export function TasksWorkspace({
   // touches this state at all.
   const [companies, setCompanies] = useState<Company[]>([]);
   const [deals, setDeals] = useState<Deal[]>([]);
+  // CRM Phase C — joins the same fetch-once-on-mount state as
+  // companies/deals just above, for the same reason (see the effect below).
+  const [contacts, setContacts] = useState<Contact[]>([]);
   const [crmLoaded, setCrmLoaded] = useState(false);
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [selectedDealId, setSelectedDealId] = useState<string | null>(null);
+  const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [managingForms, setManagingForms] = useState(false);
   const [managingProjects, setManagingProjects] = useState(false);
@@ -443,24 +459,32 @@ export function TasksWorkspace({
   );
   const bucketColumns = useMemo(() => buildBucketColumns(filteredAllRows, bucketTeams), [filteredAllRows, bucketTeams]);
 
-  // CRM Phase A — the one, one-time fetch of Companies/Deals data. Runs
-  // once on mount (orgId is stable for the life of this component), never
-  // again — in particular, never in response to a Task/Project
-  // router.refresh() elsewhere in the app, which is the whole point (see
-  // lib/actions.ts's own comment on getCompaniesData/getDealsData).
+  // CRM Phase A/C — the one, one-time fetch of Companies/Deals/Contacts
+  // data. Runs once on mount (orgId is stable for the life of this
+  // component), never again — in particular, never in response to a
+  // Task/Project router.refresh() elsewhere in the app, which is the whole
+  // point (see lib/actions.ts's own comment on getCompaniesData/
+  // getDealsData/getOrgContactsData).
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [companiesData, dealsData] = await Promise.all([getCompaniesData(orgId), getDealsData(orgId)]);
+      const [companiesData, dealsData, contactsData] = await Promise.all([
+        getCompaniesData(orgId),
+        getDealsData(orgId),
+        getOrgContactsData(orgId),
+      ]);
       if (cancelled) return;
       setCompanies(companiesData);
       setDeals(dealsData);
+      setContacts(contactsData);
       setCrmLoaded(true);
     })();
     return () => {
       cancelled = true;
     };
   }, [orgId]);
+
+  const companiesById = useMemo(() => new Map(companies.map((c) => [c.id, c])), [companies]);
 
   // Deals don't belong to a project, so they carry their own workflow_id
   // directly rather than inheriting one via projects.workflow_id — see
@@ -530,6 +554,9 @@ export function TasksWorkspace({
           </button>
           <button type="button" className={`view-tab ${view === "deals" ? "active" : ""}`} onClick={() => setView("deals")}>
             <DealsIcon /> Deals
+          </button>
+          <button type="button" className={`view-tab ${view === "contacts" ? "active" : ""}`} onClick={() => setView("contacts")}>
+            <ContactsIcon /> Contacts
           </button>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -647,6 +674,17 @@ export function TasksWorkspace({
           loaded={crmLoaded}
           search={search}
           onSelectDeal={setSelectedDealId}
+        />
+      )}
+      {view === "contacts" && (
+        <ContactsView
+          orgId={orgId}
+          contacts={contacts}
+          setContacts={setContacts}
+          companiesById={companiesById}
+          loaded={crmLoaded}
+          search={search}
+          onSelectContact={setSelectedContactId}
         />
       )}
 
@@ -779,6 +817,10 @@ export function TasksWorkspace({
                 setSelectedCompanyId(null);
                 setSelectedDealId(dealId);
               }}
+              onSelectContact={(contactId) => {
+                setSelectedCompanyId(null);
+                setSelectedContactId(contactId);
+              }}
               onClose={() => setSelectedCompanyId(null)}
             />
           );
@@ -800,7 +842,35 @@ export function TasksWorkspace({
                 setSelectedDealId(null);
                 setSelectedCompanyId(companyId);
               }}
+              onSelectContact={(contactId) => {
+                setSelectedDealId(null);
+                setSelectedContactId(contactId);
+              }}
               onClose={() => setSelectedDealId(null)}
+            />
+          );
+        })()}
+
+      {selectedContactId &&
+        (() => {
+          const contact = contacts.find((c) => c.id === selectedContactId);
+          if (!contact) return null;
+          return (
+            <ContactPanel
+              contact={contact}
+              companies={companies}
+              deals={deals}
+              dealStatusesById={dealStatusesById}
+              onContactChange={setContacts}
+              onSelectCompany={(companyId) => {
+                setSelectedContactId(null);
+                setSelectedCompanyId(companyId);
+              }}
+              onSelectDeal={(dealId) => {
+                setSelectedContactId(null);
+                setSelectedDealId(dealId);
+              }}
+              onClose={() => setSelectedContactId(null)}
             />
           );
         })()}

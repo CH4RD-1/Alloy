@@ -394,7 +394,9 @@ create table contacts (
   name        text,
   email       text,
   phone       text,                -- E.164 format for WhatsApp, e.g. +14155551234
-  created_at  timestamptz not null default now()
+  notes       text,                -- CRM Phase C — freeform, same shape as companies.notes
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
 );
 
 create index on contacts (org_id);
@@ -829,6 +831,9 @@ create trigger companies_set_updated_at before update on companies
   for each row execute function set_updated_at();
 
 create trigger deals_set_updated_at before update on deals
+  for each row execute function set_updated_at();
+
+create trigger contacts_set_updated_at before update on contacts
   for each row execute function set_updated_at();
 
 

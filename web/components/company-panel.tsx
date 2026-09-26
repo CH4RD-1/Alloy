@@ -9,7 +9,7 @@ import {
   getOrgContactsData,
   setContactCompany,
 } from "@/lib/actions";
-import { dealOutcome, dealValueLabel } from "@/lib/crm-view";
+import { contactLabel, dealOutcome, dealValueLabel } from "@/lib/crm-view";
 
 // CRM Phase A — mirrors components/asset-panel.tsx's shape (fields save on
 // blur, a divider, then linked-record sections, then delete) but fetches its
@@ -23,6 +23,7 @@ export function CompanyPanel({
   dealStatusesById,
   onCompanyChange,
   onSelectDeal,
+  onSelectContact,
   onClose,
 }: {
   company: Company;
@@ -30,6 +31,7 @@ export function CompanyPanel({
   dealStatusesById: Map<string, WorkflowStatus>;
   onCompanyChange: (updater: (prev: Company[]) => Company[]) => void;
   onSelectDeal: (id: string) => void;
+  onSelectContact: (id: string) => void;
   onClose: () => void;
 }) {
   const [pending, setPending] = useState(false);
@@ -168,9 +170,23 @@ export function CompanyPanel({
             {!contactsLoaded && <div className="empty-note">Loading…</div>}
             {contactsLoaded && linkedContacts.length === 0 && <div className="empty-note">No contacts linked yet.</div>}
             {linkedContacts.map((c) => (
-              <div key={c.id} className="crumbline" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                <span>{c.name || c.email || c.phone || "Unnamed contact"}</span>
-                <button className="icon-btn" disabled={pending} onClick={() => unlinkContact(c.id)} aria-label="Unlink contact" title="Unlink">
+              <div
+                key={c.id}
+                className="crumbline"
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, cursor: "pointer" }}
+                onClick={() => onSelectContact(c.id)}
+              >
+                <span>{contactLabel(c)}</span>
+                <button
+                  className="icon-btn"
+                  disabled={pending}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    unlinkContact(c.id);
+                  }}
+                  aria-label="Unlink contact"
+                  title="Unlink"
+                >
                   ✕
                 </button>
               </div>
@@ -181,7 +197,7 @@ export function CompanyPanel({
                   <option value="">Link an existing contact…</option>
                   {candidateContacts.map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.name || c.email || c.phone || "Unnamed contact"}
+                      {contactLabel(c)}
                     </option>
                   ))}
                 </select>
