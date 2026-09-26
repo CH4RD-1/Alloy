@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type {
   Workflow,
@@ -72,15 +72,92 @@ function tint(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+// Same SVG-space conversion as gantt-view.tsx's own svgPoint — duplicated
+// locally (this file has no reason to import from that one otherwise) for
+// the flow chart's drag-to-link below.
+function svgPoint(svg: SVGSVGElement, clientX: number, clientY: number) {
+  const r = svg.getBoundingClientRect();
+  const vb = svg.viewBox.baseVal;
+  const scaleX = vb.width / r.width || 1;
+  const scaleY = vb.height / r.height || 1;
+  return { x: (clientX - r.left) * scaleX, y: (clientY - r.top) * scaleY };
+}
+
+// Same idea as gantt-view.tsx's own pair of the same name — suppressing
+// text selection for the duration of a drag so dragging across the SVG
+// doesn't also highlight page text.
+function disableTextSelection() {
+  document.body.style.userSelect = "none";
+}
+function restoreTextSelection() {
+  document.body.style.userSelect = "";
+}
+
+interface EdgeMenuState {
+  transitionId: string;
+  fromStatusId: string;
+  toStatusId: string;
+  allowedRoles: Set<Role>;
+  requireSubtasks: boolean;
+  requireChecklists: boolean;
+  x: number;
+  y: number;
+}
+
 // A simple auto-laid-out diagram of one workflow's states/transitions —
 // states in position order along a single row, transitions drawn as curved
 // arrows (below the row for a "forward" move, above it for a "backward"
-// one, so a typical mostly-linear workflow doesn't turn into a tangle).
-// Deliberately not a draggable/editable canvas — the lists below it are
-// still where states and transitions actually get changed; this is a
-// read-only picture of what those lists currently describe.
-function WorkflowFlowChart({ statuses, transitions }: { statuses: WorkflowStatus[]; transitions: WorkflowTransition[] }) {
+// one, so a typical mostly-linear workflow doesn't turn into a tangle). Now
+// also its own editing surface, not just a picture of what the lists below
+// describe: each state has 4 small drag handles (top/right/bottom/left —
+// any of them starts the same drag, the side is just where you grabbed it),
+// mirroring gantt-view.tsx's own handleLinkMouseDown almost exactly —
+// dragging to a different state's box and dropping either creates a new
+// transition there (wide-open defaults: every role, no require-complete
+// gates — the same "start permissive, refine after" idea as a Gantt link
+// always starting out "Blocked") or, if one already exists for that exact
+// pair, opens the same edit popover a click on the transition's own arrow
+// opens. That popover (allowed roles, the two require checkboxes, remove)
+// is this diagram's equivalent of Gantt's floating link-type menu — the
+// list-based "Add / update a transition" form below is untouched and still
+// works exactly as before; this is a second way to reach the same
+// upsertWorkflowTransition/deleteWorkflowTransition actions, not a
+// replacement for it.
+function WorkflowFlowChart({
+  orgId,
+  statuses,
+  transitions,
+  pending,
+  run,
+}: {
+  orgId: string;
+  statuses: WorkflowStatus[];
+  transitions: WorkflowTransition[];
+  pending: boolean;
+  run: (action: () => Promise<unknown>) => void;
+}) {
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [edgeMenu, setEdgeMenu] = useState<EdgeMenuState | null>(null);
+
   const ordered = [...statuses].sort((a, b) => a.position - b.position);
+
+  useEffect(() => {
+    if (!edgeMenu) return;
+    function onDocMouseDown(ev: MouseEvent) {
+      if ((ev.target as Element).closest(".wf-flow-edge-menu")) return;
+      setEdgeMenu(null);
+    }
+    function onScroll() {
+      setEdgeMenu(null);
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [edgeMenu]);
+
   if (ordered.length === 0) {
     return <p style={{ color: "var(--text-faint)", fontSize: 12.5, padding: "20px 0" }}>Add a state below to see it here.</p>;
   }
@@ -90,13 +167,130 @@ function WorkflowFlowChart({ statuses, transitions }: { statuses: WorkflowStatus
   const padding = 24;
   const rowY = 76;
   const idxById = new Map(ordered.map((s, i) => [s.id, i]));
+  const statusById = new Map(ordered.map((s) => [s.id, s]));
   const xFor = (i: number) => padding + i * (nodeW + gapX);
   const width = padding * 2 + ordered.length * nodeW + Math.max(0, ordered.length - 1) * gapX;
   const height = 220;
 
+  function openEdgeMenu(t: WorkflowTransition, clientX: number, clientY: number) {
+    setEdgeMenu({
+      transitionId: t.id,
+      fromStatusId: t.from_status_id,
+      toStatusId: t.to_status_id,
+      allowedRoles: new Set(t.allowed_roles as Role[]),
+      requireSubtasks: t.require_subtasks_complete,
+      requireChecklists: t.require_checklists_complete,
+      x: clientX,
+      y: clientY,
+    });
+  }
+
+  function handleMouseDown(e: React.MouseEvent, fromStatusId: string, startX: number, startY: number) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const svg = svgRef.current;
+    if (!svg) return;
+
+    disableTextSelection();
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("class", "wf-flow-link-preview");
+    line.setAttribute("x1", String(startX));
+    line.setAttribute("y1", String(startY));
+    line.setAttribute("x2", String(startX));
+    line.setAttribute("y2", String(startY));
+    svg.appendChild(line);
+
+    let hoverTarget: Element | null = null;
+    function clearHover() {
+      if (hoverTarget) {
+        hoverTarget.classList.remove("wf-flow-node-target");
+        hoverTarget = null;
+      }
+    }
+    function onMove(ev: MouseEvent) {
+      const p = svgPoint(svg!, ev.clientX, ev.clientY);
+      line.setAttribute("x2", String(p.x));
+      line.setAttribute("y2", String(p.y));
+      const hoverEl = document.elementFromPoint(ev.clientX, ev.clientY);
+      const grp = hoverEl?.closest(".wf-flow-node") ?? null;
+      const valid = grp && grp.getAttribute("data-status-id") !== fromStatusId ? grp : null;
+      if (hoverTarget !== valid) {
+        clearHover();
+        if (valid) {
+          valid.classList.add("wf-flow-node-target");
+          hoverTarget = valid;
+        }
+      }
+    }
+    function onUp(ev: MouseEvent) {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      restoreTextSelection();
+      clearHover();
+      line.remove();
+      const dropEl = document.elementFromPoint(ev.clientX, ev.clientY);
+      const grp = dropEl?.closest(".wf-flow-node");
+      const toStatusId = grp?.getAttribute("data-status-id");
+      if (toStatusId && toStatusId !== fromStatusId) {
+        const existing = transitions.find((t) => t.from_status_id === fromStatusId && t.to_status_id === toStatusId);
+        if (existing) {
+          openEdgeMenu(existing, ev.clientX, ev.clientY);
+        } else {
+          run(() =>
+            upsertWorkflowTransition(orgId, {
+              from_status_id: fromStatusId,
+              to_status_id: toStatusId,
+              allowed_roles: WORKFLOW_ROLES.map((r) => r.id),
+              require_subtasks_complete: false,
+              require_checklists_complete: false,
+            })
+          );
+        }
+      }
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }
+
+  function toggleEdgeRole(r: Role) {
+    setEdgeMenu((prev) => {
+      if (!prev) return prev;
+      const next = new Set(prev.allowedRoles);
+      if (next.has(r)) next.delete(r);
+      else next.add(r);
+      return { ...prev, allowedRoles: next };
+    });
+  }
+
+  function saveEdgeMenu() {
+    if (!edgeMenu) return;
+    const { fromStatusId, toStatusId, allowedRoles, requireSubtasks, requireChecklists } = edgeMenu;
+    setEdgeMenu(null);
+    run(() =>
+      upsertWorkflowTransition(orgId, {
+        from_status_id: fromStatusId,
+        to_status_id: toStatusId,
+        allowed_roles: Array.from(allowedRoles),
+        require_subtasks_complete: requireSubtasks,
+        require_checklists_complete: requireChecklists,
+      })
+    );
+  }
+
+  function removeEdgeMenu() {
+    if (!edgeMenu) return;
+    const { transitionId } = edgeMenu;
+    setEdgeMenu(null);
+    run(() => deleteWorkflowTransition(transitionId));
+  }
+
   return (
     <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface-2)", padding: 8 }}>
-      <svg width={Math.max(width, 300)} height={height} style={{ display: "block" }}>
+      <p style={{ color: "var(--text-faint)", fontSize: 11.5, margin: "0 0 6px" }}>
+        Drag from a state&apos;s edge to another state to add a transition; click an existing arrow to edit or remove it.
+      </p>
+      <svg ref={svgRef} width={Math.max(width, 300)} height={height} style={{ display: "block" }}>
         <defs>
           <marker id="wf-flow-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)" />
@@ -113,18 +307,93 @@ function WorkflowFlowChart({ statuses, transitions }: { statuses: WorkflowStatus
           const curveY = forward ? rowY + nodeH + 40 : rowY - 40;
           const path = `M ${x1} ${edgeY} C ${x1} ${curveY}, ${x2} ${curveY}, ${x2} ${edgeY}`;
           return (
-            <path key={t.id} d={path} fill="none" stroke="var(--text-faint)" strokeWidth={1.5} opacity={0.75} markerEnd="url(#wf-flow-arrow)" />
+            <g key={t.id}>
+              <path d={path} fill="none" stroke="var(--text-faint)" strokeWidth={1.5} opacity={0.75} markerEnd="url(#wf-flow-arrow)" />
+              {/* Invisible wide-stroke overlay, same trick as
+                  gantt-view.tsx's own .gantt-link-hit — the visible curve
+                  above is too thin to click reliably. */}
+              <path
+                d={path}
+                className="wf-flow-edge-hit"
+                fill="none"
+                stroke="transparent"
+                strokeWidth={12}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openEdgeMenu(t, e.clientX, e.clientY);
+                }}
+              />
+            </g>
           );
         })}
-        {ordered.map((s, i) => (
-          <g key={s.id} transform={`translate(${xFor(i)}, ${rowY})`}>
-            <rect width={nodeW} height={nodeH} rx={10} fill={tint(s.color, 0.18)} stroke={s.color} strokeWidth={1.5} />
-            <text x={nodeW / 2} y={nodeH / 2 + 4} textAnchor="middle" fontSize={12} fontWeight={600} fill={s.color}>
-              {s.label}
-            </text>
-          </g>
-        ))}
+        {ordered.map((s, i) => {
+          const x = xFor(i);
+          const cx = nodeW / 2;
+          const cy = nodeH / 2;
+          // Top/right/bottom/left — any one starts the same drag (see
+          // handleMouseDown); having all 4 just means there's always a
+          // handle facing whichever neighbor you're connecting to.
+          const handles: { cx: number; cy: number }[] = [
+            { cx, cy: 0 },
+            { cx: nodeW, cy },
+            { cx, cy: nodeH },
+            { cx: 0, cy },
+          ];
+          return (
+            <g key={s.id} className="wf-flow-node" data-status-id={s.id} transform={`translate(${x}, ${rowY})`}>
+              <rect width={nodeW} height={nodeH} rx={10} fill={tint(s.color, 0.18)} stroke={s.color} strokeWidth={1.5} />
+              <text x={nodeW / 2} y={nodeH / 2 + 4} textAnchor="middle" fontSize={12} fontWeight={600} fill={s.color}>
+                {s.label}
+              </text>
+              {handles.map((h, hi) => (
+                <circle
+                  key={hi}
+                  className="wf-flow-handle"
+                  cx={h.cx}
+                  cy={h.cy}
+                  r={5}
+                  onMouseDown={(e) => handleMouseDown(e, s.id, x + h.cx, rowY + h.cy)}
+                />
+              ))}
+            </g>
+          );
+        })}
       </svg>
+      {edgeMenu && (
+        <div className="obj-menu wf-flow-edge-menu" style={{ position: "fixed", left: edgeMenu.x + 10, top: edgeMenu.y + 10, zIndex: 60, width: 220 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 700, padding: "2px 6px 6px" }}>
+            {statusById.get(edgeMenu.fromStatusId)?.label ?? "Unknown"} → {statusById.get(edgeMenu.toStatusId)?.label ?? "Unknown"}
+          </div>
+          {WORKFLOW_ROLES.map((r) => (
+            <label key={r.id} className="checkbox-row" style={{ padding: "2px 6px" }}>
+              <input type="checkbox" checked={edgeMenu.allowedRoles.has(r.id)} onChange={() => toggleEdgeRole(r.id)} /> {r.name}
+            </label>
+          ))}
+          <label className="checkbox-row" style={{ padding: "2px 6px" }}>
+            <input
+              type="checkbox"
+              checked={edgeMenu.requireSubtasks}
+              onChange={(e) => setEdgeMenu((prev) => (prev ? { ...prev, requireSubtasks: e.target.checked } : prev))}
+            />{" "}
+            Require subtasks complete
+          </label>
+          <label className="checkbox-row" style={{ padding: "2px 6px" }}>
+            <input
+              type="checkbox"
+              checked={edgeMenu.requireChecklists}
+              onChange={(e) => setEdgeMenu((prev) => (prev ? { ...prev, requireChecklists: e.target.checked } : prev))}
+            />{" "}
+            Require checklists complete
+          </label>
+          <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
+          <button type="button" className="obj-menu-item" disabled={pending || edgeMenu.allowedRoles.size === 0} onClick={saveEdgeMenu}>
+            Save
+          </button>
+          <button type="button" className="obj-menu-item" style={{ color: "var(--blocked)" }} disabled={pending} onClick={removeEdgeMenu}>
+            Remove transition
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -630,7 +899,7 @@ export function WorkflowPanel({
 
                     <div className="field-group">
                       <span className="field-label">Flow chart</span>
-                      <WorkflowFlowChart statuses={workflowStatuses} transitions={workflowTransitions} />
+                      <WorkflowFlowChart orgId={orgId} statuses={workflowStatuses} transitions={workflowTransitions} pending={pending} run={run} />
                     </div>
 
                     <div className="wf-editor-columns">
