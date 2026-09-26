@@ -557,6 +557,10 @@ export function TasksWorkspace({
           vocabTask={vocabTask}
           activityLog={activityLog}
           onSelectTask={setSelectedTaskId}
+          deals={deals}
+          dealStatusesById={dealStatusesById}
+          dealsLoaded={crmLoaded}
+          onOpenDeals={() => setView("deals")}
         />
       )}
 

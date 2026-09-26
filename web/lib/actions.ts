@@ -19,6 +19,7 @@ import type {
   Contact,
   Task,
   ScheduleChange,
+  DealActivityLogEntry,
   WorkflowTransitionAction,
   TransitionActionType,
   TransitionActionConfig,
@@ -99,6 +100,38 @@ async function logActivity(
     });
   } catch {
     // Best-effort — see comment above.
+  }
+}
+
+// Deal activity log's own write side — same shape and same best-effort
+// swallow-on-failure as logActivity() above, just for deal_activity_log
+// (see that table's own comment in schema.sql/deal_activity_log.sql for why
+// it's a separate table rather than widening activity_log itself). Every
+// call site here has a real signed-in caller (unlike logActivity, which
+// also serves the Portal's service-role path), so there's no
+// actor_contact_id branch to take.
+async function logDealActivity(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  input: {
+    orgId: string;
+    dealId: string;
+    type: "created" | "stage";
+    fromStatusId?: string | null;
+    toStatusId?: string | null;
+    actorUserId: string;
+  }
+) {
+  try {
+    await supabase.from("deal_activity_log").insert({
+      org_id: input.orgId,
+      deal_id: input.dealId,
+      type: input.type,
+      from_status_id: input.fromStatusId ?? null,
+      to_status_id: input.toStatusId ?? null,
+      actor_user_id: input.actorUserId,
+    });
+  } catch {
+    // Best-effort — see logActivity's own comment above.
   }
 }
 
@@ -3690,7 +3723,7 @@ export async function createDeal(
     expectedCloseDate?: string | null;
   }
 ): Promise<Deal> {
-  const { supabase } = await requireUser();
+  const { supabase, user } = await requireUser();
   const { data, error } = await supabase
     .from("deals")
     .insert({
@@ -3708,6 +3741,7 @@ export async function createDeal(
     .select("*")
     .single();
   if (error) throw new Error(error.message);
+  await logDealActivity(supabase, { orgId, dealId: data.id as string, type: "created", actorUserId: user.id });
   return data as Deal;
 }
 
@@ -3758,6 +3792,15 @@ export async function updateDealStage(dealId: string, statusId: string): Promise
 
   if (fromStatusId === statusId) return { affectedTasks: false };
 
+  await logDealActivity(supabase, {
+    orgId: deal.org_id as string,
+    dealId,
+    type: "stage",
+    fromStatusId,
+    toStatusId: statusId,
+    actorUserId: user.id,
+  });
+
   return runDealStageActions(supabase, {
     orgId: deal.org_id as string,
     dealId,
@@ -3773,4 +3816,22 @@ export async function deleteDeal(dealId: string): Promise<void> {
   const { supabase } = await requireUser();
   const { error } = await supabase.from("deals").delete().eq("id", dealId);
   if (error) throw new Error(error.message);
+}
+
+// Fetched on demand by DealPanel when it opens (same "not part of the
+// server-rendered WorkspaceData props" shape as getOrgContactsData just
+// above it) rather than folded into getDealsData/getWorkspaceData — a
+// deal's activity is detail-view-only data, never needed for the kanban
+// board or the deals list, so there's no reason to pay for every deal's
+// history on every load the way that would.
+export async function getDealActivityLog(dealId: string): Promise<DealActivityLogEntry[]> {
+  const { supabase } = await requireUser();
+  const { data, error } = await supabase
+    .from("deal_activity_log")
+    .select("*")
+    .eq("deal_id", dealId)
+    .order("created_at", { ascending: false })
+    .limit(25);
+  if (error) throw new Error(error.message);
+  return (data ?? []) as DealActivityLogEntry[];
 }

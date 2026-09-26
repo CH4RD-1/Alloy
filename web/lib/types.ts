@@ -337,6 +337,26 @@ export interface ActivityLogEntry {
   created_at: string;
 }
 
+// A Phase A/B leftover — deal_activity_log's own append-only audit trail,
+// same shape as ActivityLogEntry above but scoped to deals: only a deal's
+// creation and its stage moves are recorded (see deal_activity_log.sql's own
+// comment for why this is a separate table rather than widening
+// activity_log itself). No actor_contact_id: a deal has no anonymous-
+// Portal-submission path the way a task does, so every row here is a
+// signed-in member's own action.
+export type DealActivityType = "created" | "stage";
+
+export interface DealActivityLogEntry {
+  id: string;
+  org_id: string;
+  deal_id: string;
+  type: DealActivityType;
+  from_status_id: string | null; // only set when type = "stage"
+  to_status_id: string | null; // only set when type = "stage"
+  actor_user_id: string | null;
+  created_at: string;
+}
+
 export interface Asset {
   id: string;
   org_id: string;

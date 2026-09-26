@@ -2,11 +2,58 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { Deal, Company, Contact, WorkflowStatus } from "@/lib/types";
+import type { Deal, Company, Contact, WorkflowStatus, DealActivityLogEntry } from "@/lib/types";
 import type { MemberSummary } from "@/lib/tasks-data";
-import { updateDealFields, updateDealStage, deleteDeal, getOrgContactsData } from "@/lib/actions";
+import { updateDealFields, updateDealStage, deleteDeal, getOrgContactsData, getDealActivityLog } from "@/lib/actions";
 import { CURRENCIES, dealOutcome } from "@/lib/crm-view";
 import { DateGuideField } from "@/components/date-guide-field";
+import { hueFor, initials } from "@/lib/list-view";
+import { dealActivitySummary, timeAgo } from "@/lib/activity-view";
+
+// A Phase A/B leftover — read-only, same avatar + bolded-name-plus-verb +
+// relative-time layout as task-panel.tsx's own ActivitySection, just fed
+// from deal_activity_log instead of activity_log. `entries` arrives already
+// sorted most-recent-first (see getDealActivityLog) and pre-filtered to
+// this one deal (deal_id in the query).
+function DealActivitySection({
+  entries,
+  dealStatuses,
+  members,
+}: {
+  entries: DealActivityLogEntry[];
+  dealStatuses: WorkflowStatus[];
+  members: MemberSummary[];
+}) {
+  const statusLabelById = new Map(dealStatuses.map((s) => [s.id, s.label]));
+  const memberNameById = new Map(members.map((m) => [m.userId, m.name]));
+
+  return (
+    <div className="field-group">
+      <span className="field-label">Activity</span>
+      {entries.length === 0 ? (
+        <div className="crumbline">No activity yet — moves show up here as they happen.</div>
+      ) : (
+        entries.map((a) => {
+          const name = (a.actor_user_id && memberNameById.get(a.actor_user_id)) || "Unknown";
+          const hue = hueFor(name);
+          return (
+            <div key={a.id} className="activity-item">
+              <span className="avatar" style={{ background: `hsl(${hue} 45% 45%)` }} title={name}>
+                {initials(name)}
+              </span>
+              <div>
+                <div className="activity-text">
+                  <strong>{name}</strong> {dealActivitySummary(a, statusLabelById)}
+                </div>
+                <div className="activity-time">{timeAgo(a.created_at)}</div>
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
 
 // CRM Phase A — mirrors components/asset-panel.tsx's field-saves-on-blur
 // shape. Stage is a select rather than drag-and-drop here (the kanban in
@@ -35,6 +82,7 @@ export function DealPanel({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const [activity, setActivity] = useState<DealActivityLogEntry[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,6 +93,20 @@ export function DealPanel({
       cancelled = true;
     };
   }, [deal.org_id]);
+
+  // Fetched on demand rather than held in the Deals tab's own local state
+  // (see getDealActivityLog's own comment) — re-fetched whenever a
+  // different deal's panel opens, and again right after a stage move below
+  // so the new entry shows up without waiting for the next full reopen.
+  useEffect(() => {
+    let cancelled = false;
+    getDealActivityLog(deal.id).then((entries) => {
+      if (!cancelled) setActivity(entries);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [deal.id]);
 
   function patchLocal(patch: Partial<Deal>) {
     onDealChange((prev) => prev.map((d) => (d.id === deal.id ? { ...d, ...patch } : d)));
@@ -115,6 +177,7 @@ export function DealPanel({
                 run(async () => {
                   const { affectedTasks } = await updateDealStage(deal.id, statusId);
                   if (affectedTasks) router.refresh();
+                  getDealActivityLog(deal.id).then(setActivity);
                 });
               }}
             >
@@ -240,6 +303,8 @@ export function DealPanel({
               }}
             />
           </div>
+
+          <DealActivitySection entries={activity} dealStatuses={dealStatuses} members={members} />
 
           <button
             className="small-btn"

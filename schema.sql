@@ -482,6 +482,30 @@ create index on deals (status_id);
 create index on deals (company_id) where company_id is not null;
 create index on deals (owner_user_id) where owner_user_id is not null;
 
+-- Deal activity log — a Phase A/B leftover, same append-only audit-trail
+-- shape as activity_log above (see that table's own comment), just for
+-- deals instead of tasks: only a deal's creation and its stage moves are
+-- recorded, not a field-edit history. Kept as its own table rather than
+-- widening activity_log's task_id to a nullable, either-task-or-deal
+-- column — that would turn every existing activity_log query into a
+-- "which one is this" branch for no real benefit, since a deal's audit
+-- trail is read from exactly one place (the deal panel) and never merged
+-- with a task's. No actor_contact_id here the way activity_log has one:
+-- a deal has no anonymous-Portal-submission path, every deal_activity_log
+-- row is created by a signed-in member.
+create table deal_activity_log (
+  id                uuid primary key default gen_random_uuid(),
+  org_id            uuid not null references orgs(id) on delete cascade,
+  deal_id           uuid not null references deals(id) on delete cascade,
+  type              text not null check (type in ('created','stage')),
+  from_status_id    uuid references workflow_statuses(id) on delete set null,  -- only set when type = 'stage'
+  to_status_id      uuid references workflow_statuses(id) on delete set null,  -- only set when type = 'stage'
+  actor_user_id     uuid references users(id) on delete set null,
+  created_at        timestamptz not null default now()
+);
+
+create index on deal_activity_log (deal_id, created_at desc);
+
 
 -- ----------------------------------------------------------------------------
 -- Tasks
@@ -1073,6 +1097,15 @@ create policy activity_log_tenant_isolation on activity_log
 -- submission) runs under the service-role client, which bypasses RLS
 -- entirely — same as its writes to tasks/task_objects/contacts above — so
 -- this member-only policy never blocks it.
+
+alter table deal_activity_log enable row level security;
+create policy deal_activity_log_tenant_isolation on deal_activity_log
+  using (is_org_member(org_id))
+  with check (is_org_member(org_id));
+-- No service-role write path here (see deal_activity_log's own comment) —
+-- every write goes through logDealActivity() under the signed-in caller's
+-- own session, so unlike activity_log this member-only policy is the whole
+-- story.
 
 -- docs: members get full access; anyone (including a logged-out Portal
 -- visitor) can read a *published* doc, matching the `published` column's

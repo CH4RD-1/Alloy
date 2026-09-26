@@ -1,11 +1,12 @@
 "use client";
 
-import { useRef, useState, type DragEvent } from "react";
+import { useMemo, useRef, useState, type DragEvent } from "react";
 import { useRouter } from "next/navigation";
 import type { Deal, Company, WorkflowStatus } from "@/lib/types";
 import type { MemberSummary } from "@/lib/tasks-data";
 import { buildDealColumns, dealValueLabel } from "@/lib/crm-view";
 import { createDeal, updateDealStage } from "@/lib/actions";
+import { StatusChip } from "@/components/task-list-view";
 
 // CRM Phase A — a kanban of deal stages, structurally a straight copy of
 // components/buckets-view.tsx's own column/drag machinery (drag payload =
@@ -118,6 +119,108 @@ function DealColumnView({
   );
 }
 
+// A Phase A/B leftover: the kanban board above is great for working a
+// pipeline stage by stage, but bad at "show me everything, sorted by
+// value/close date" — the plain sortable table the prototype's other
+// entities all got via List (see task-list-view.tsx). Reuses that same
+// visual language (StatusChip, a bordered/rounded table shell) with its own
+// column set and grid (see .deals-list-* in globals.css) rather than trying
+// to fit a deal's fields into TaskListView's task-shaped columns.
+type DealSortKey = "title" | "value" | "close" | "updated";
+
+function DealListRow({
+  deal,
+  company,
+  status,
+  ownerName,
+  onSelect,
+}: {
+  deal: Deal;
+  company: Company | undefined;
+  status: WorkflowStatus | undefined;
+  ownerName: string | undefined;
+  onSelect: () => void;
+}) {
+  return (
+    <div className="deals-list-row" onClick={onSelect}>
+      <div className="row-title" title={deal.title}>
+        {deal.title}
+      </div>
+      <div className="cell-dates">{company?.name ?? "—"}</div>
+      <div>
+        {status ? <StatusChip statusKey={status.key} label={status.label} color={status.color} /> : "—"}
+      </div>
+      <div className="mono">{dealValueLabel(deal) || "—"}</div>
+      <div className="cell-dates">{ownerName ?? "Unassigned"}</div>
+      <div className="cell-dates">{deal.expected_close_date ?? "—"}</div>
+    </div>
+  );
+}
+
+function DealsListView({
+  deals,
+  companiesById,
+  statusesById,
+  ownerNameById,
+  onSelectDeal,
+}: {
+  deals: Deal[];
+  companiesById: Map<string, Company>;
+  statusesById: Map<string, WorkflowStatus>;
+  ownerNameById: Map<string, string>;
+  onSelectDeal: (id: string) => void;
+}) {
+  const [sortKey, setSortKey] = useState<DealSortKey>("updated");
+
+  const sorted = useMemo(() => {
+    const copy = [...deals];
+    switch (sortKey) {
+      case "title":
+        return copy.sort((a, b) => a.title.localeCompare(b.title));
+      case "value":
+        return copy.sort((a, b) => (b.value ?? -1) - (a.value ?? -1));
+      case "close":
+        // Deals with no expected_close_date sort last, not first, so an
+        // unscheduled deal never crowds out the ones that actually need
+        // attention soon.
+        return copy.sort((a, b) => (a.expected_close_date ?? "9999-99-99").localeCompare(b.expected_close_date ?? "9999-99-99"));
+      case "updated":
+      default:
+        return copy.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    }
+  }, [deals, sortKey]);
+
+  return (
+    <div className="deals-list-table">
+      <div className="deals-list-head">
+        <button type="button" className="list-head-sort" onClick={() => setSortKey("title")}>
+          Deal
+        </button>
+        <div>Company</div>
+        <div>Stage</div>
+        <button type="button" className="list-head-sort" onClick={() => setSortKey("value")}>
+          Value
+        </button>
+        <div>Owner</div>
+        <button type="button" className="list-head-sort" onClick={() => setSortKey("close")}>
+          Close date
+        </button>
+      </div>
+      {sorted.length === 0 && <div className="empty-note">No deals match.</div>}
+      {sorted.map((d) => (
+        <DealListRow
+          key={d.id}
+          deal={d}
+          company={d.company_id ? companiesById.get(d.company_id) : undefined}
+          status={statusesById.get(d.status_id)}
+          ownerName={d.owner_user_id ? ownerNameById.get(d.owner_user_id) : undefined}
+          onSelect={() => onSelectDeal(d.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
 export function DealsView({
   orgId,
   deals,
@@ -142,6 +245,7 @@ export function DealsView({
   onSelectDeal: (id: string) => void;
 }) {
   const router = useRouter();
+  const [viewMode, setViewMode] = useState<"board" | "list">("board");
   const [draggingDealId, setDraggingDealId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -149,6 +253,7 @@ export function DealsView({
 
   const companiesById = new Map(companies.map((c) => [c.id, c]));
   const ownerNameById = new Map(members.map((m) => [m.userId, m.name]));
+  const statusesById = new Map(dealStatuses.map((s) => [s.id, s]));
 
   const q = search.trim().toLowerCase();
   const filteredDeals = q ? deals.filter((d) => d.title.toLowerCase().includes(q)) : deals;
@@ -220,15 +325,40 @@ export function DealsView({
           <div className="view-title">Deals</div>
           <div className="view-sub">{loaded ? `${deals.length} deal${deals.length === 1 ? "" : "s"}` : "Loading…"}</div>
         </div>
-        <button className="small-btn" disabled={creating || !dealWorkflowId} onClick={newDeal}>
-          + New deal
-        </button>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          {/* Board vs. List — same .view-tabs pattern the Tasks workspace's
+              own List/Buckets/Gantt switcher uses (app-sidebar.tsx), just
+              scoped locally: Deals owns its own small tab set rather than a
+              whole ViewKey entry, since it's one self-contained component
+              with its own data (see this file's own header comment). Board
+              stays the default — it's the one you work a pipeline from day
+              to day — List is for scanning/sorting the whole set at once. */}
+          <div className="view-tabs" style={{ margin: 0 }}>
+            <button type="button" className={`view-tab ${viewMode === "board" ? "active" : ""}`} onClick={() => setViewMode("board")}>
+              Board
+            </button>
+            <button type="button" className={`view-tab ${viewMode === "list" ? "active" : ""}`} onClick={() => setViewMode("list")}>
+              List
+            </button>
+          </div>
+          <button className="small-btn" disabled={creating || !dealWorkflowId} onClick={newDeal}>
+            + New deal
+          </button>
+        </div>
       </div>
       {error && <div className="banner">{error}</div>}
       {loaded && !dealWorkflowId ? (
         <div className="empty-note">
           No Deal Pipeline workflow found for this org yet — run the crm_phase_a.sql patch against the database, then reload.
         </div>
+      ) : viewMode === "list" ? (
+        <DealsListView
+          deals={filteredDeals}
+          companiesById={companiesById}
+          statusesById={statusesById}
+          ownerNameById={ownerNameById}
+          onSelectDeal={onSelectDeal}
+        />
       ) : (
         <div className="buckets-scroll" ref={scrollRef} onMouseDown={handlePanMouseDown}>
           <div className="buckets-row">

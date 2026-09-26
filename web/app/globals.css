@@ -320,6 +320,63 @@ html {
 .row-indent {
   flex: 0 0 auto;
 }
+
+/* ============ DEALS LIST VIEW (Phase A/B leftover) ============ */
+/* Same bordered/rounded table shell as .list-table above, just with its own
+   column set and grid — a deal has nothing resembling a subtask tree, so
+   this never needs .list-row's depth/sub-row variants. See
+   components/deals-view.tsx's DealsListView. */
+.deals-list-table {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--surface);
+  color: var(--text);
+}
+.deals-list-head,
+.deals-list-row {
+  display: grid;
+  grid-template-columns: minmax(200px, 3fr) 160px 130px 110px 150px 110px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+}
+.deals-list-head {
+  height: 34px;
+  background: var(--surface-2);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--border);
+}
+.deals-list-row {
+  height: 44px;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+.deals-list-row:hover {
+  background: var(--surface-2);
+}
+/* A sortable column header, styled to sit flush with its plain-<div>
+   siblings in the same head row (no button chrome) but still clearly
+   clickable — used by DealsListView's Deal/Value/Close date headers. */
+.list-head-sort {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.list-head-sort:hover {
+  color: var(--text);
+}
 .cell-title {
   display: flex;
   align-items: center;
