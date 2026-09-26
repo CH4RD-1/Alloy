@@ -4,6 +4,7 @@ import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { TaskRow } from "@/lib/list-view";
 import { hueFor, initials, MAX_TASK_DEPTH } from "@/lib/list-view";
+import type { TaskPatch } from "@/lib/task-patches";
 import { taskDurationDays, type DurationUnit, DURATION_UNITS, addDurationToDate } from "@/lib/date-only";
 import { DateGuideField } from "@/components/date-guide-field";
 import type {
@@ -87,7 +88,7 @@ function DurationField({
 }: {
   taskId: string;
   startDate: string | null;
-  run: (action: () => Promise<unknown>) => void;
+  run: (action: () => Promise<unknown>, patch?: TaskPatch) => void;
   durationDays: number | null;
 }) {
   const [amount, setAmount] = useState(durationDays === null ? "" : String(durationDays));
@@ -98,7 +99,7 @@ function DurationField({
     const value = Number(nextAmount);
     if (!Number.isFinite(value) || value < 0) return;
     const due = addDurationToDate(startDate, value, nextUnit);
-    run(() => updateTaskFields(taskId, { due_date: due }));
+    run(() => updateTaskFields(taskId, { due_date: due }), { due_date: due });
   }
 
   return (
@@ -171,6 +172,7 @@ export function TaskPanel({
   onSelectDoc,
   onWidthChange,
   onClose,
+  onPatchTasks,
 }: {
   taskId: string;
   allRows: TaskRow[]; // flattened: every task, top-level and sub (see flattenRows)
@@ -222,6 +224,15 @@ export function TaskPanel({
   // .panel-doc's own comment in globals.css for the bug this fixes.
   onWidthChange?: (widthPx: number) => void;
   onClose: () => void;
+  // Optimistic patch overlay hook (see lib/task-patches.ts) — this panel is
+  // the single biggest source of plain field edits and status moves in the
+  // app, and every one of them used to be invisible anywhere else (the List
+  // row behind this panel, a Buckets tile, another open view) until
+  // router.refresh() finished re-running the full workspace fetch. `run()`
+  // below now applies a matching patch immediately, before the server
+  // round-trip, so the rest of the app already agrees with what this panel
+  // shows the moment you make the change.
+  onPatchTasks: (patches: Record<string, TaskPatch>) => void;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -281,16 +292,45 @@ export function TaskPanel({
     );
   }
 
-  function run(action: () => Promise<unknown>) {
+  // `patch`, when given, is applied to taskId immediately — before the
+  // server round-trip even starts — so every other view already reflects
+  // it the instant this returns, rather than waiting on router.refresh() to
+  // re-run the full workspace fetch (see TaskPatch's own comment). On
+  // failure, refresh() re-syncs from the server so a rejected optimistic
+  // patch never lingers as a display lie.
+  function run(action: () => Promise<unknown>, patch?: TaskPatch) {
     setError(null);
+    if (patch) onPatchTasks({ [taskId]: patch });
     startTransition(async () => {
       try {
         await action();
         router.refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Something went wrong.");
+        if (patch) router.refresh();
       }
     });
+  }
+
+  // Small patch builders mirroring exactly how buildRows() (lib/list-view.ts)
+  // derives these same TaskRow fields from a raw id, so an optimistic patch
+  // never disagrees with what the next real refresh will show.
+  function statusPatch(statusId: string): TaskPatch {
+    const s = statuses.find((x) => x.id === statusId);
+    return {
+      status_id: statusId,
+      statusKey: s?.key ?? "backlog",
+      statusLabel: s?.label ?? "—",
+      statusColor: s?.color ?? "#64748b",
+      statusIsClosed: !!s?.is_closed,
+    };
+  }
+  function assigneePatch(assigneeId: string | null): TaskPatch {
+    return { assignee_id: assigneeId, assigneeName: assigneeId ? members.find((m) => m.userId === assigneeId)?.name ?? null : null };
+  }
+  function teamPatch(teamId: string | null): TaskPatch {
+    const t = teamId ? teams.find((x) => x.id === teamId) : null;
+    return { team_id: teamId, teamName: t?.name ?? null, teamColor: t?.color ?? null };
   }
 
   const projectTeams = teams.filter((t) => t.project_id === task.project_id);
@@ -345,7 +385,7 @@ export function TaskPanel({
               defaultValue={task.title}
               onBlur={(e) => {
                 const value = e.target.value.trim();
-                if (value && value !== task.title) run(() => updateTaskFields(taskId, { title: value }));
+                if (value && value !== task.title) run(() => updateTaskFields(taskId, { title: value }), { title: value });
               }}
             />
             <div className="crumbline">
@@ -400,7 +440,7 @@ export function TaskPanel({
                       className="move-btn"
                       disabled={!allowed || pending}
                       title={allowed ? undefined : "Your role can't make this move"}
-                      onClick={() => run(() => updateTaskStatus(taskId, t.to_status_id, actingAsUserId))}
+                      onClick={() => run(() => updateTaskStatus(taskId, t.to_status_id, actingAsUserId), statusPatch(t.to_status_id))}
                     >
                       → {toStatus?.label}
                     </button>
@@ -420,7 +460,7 @@ export function TaskPanel({
               placeholder="More detailed description of the issue…."
               onBlur={(e) => {
                 const value = e.target.value;
-                if (value !== (task.description ?? "")) run(() => updateTaskFields(taskId, { description: value || null }));
+                if (value !== (task.description ?? "")) run(() => updateTaskFields(taskId, { description: value || null }), { description: value || null });
               }}
             />
           </div>
@@ -486,7 +526,7 @@ export function TaskPanel({
             <select
               className="select-input"
               defaultValue={task.assignee_id ?? ""}
-              onChange={(e) => run(() => updateTaskFields(taskId, { assignee_id: e.target.value || null }))}
+              onChange={(e) => run(() => updateTaskFields(taskId, { assignee_id: e.target.value || null }), assigneePatch(e.target.value || null))}
             >
               <option value="">Unassigned</option>
               {eligibleAssignees(members, task.team_id, teamMemberIdsByTeam, orgTeamAllocationEnabled, task.assignee_id).map(
@@ -514,7 +554,7 @@ export function TaskPanel({
             <select
               className="select-input"
               defaultValue={task.team_id ?? ""}
-              onChange={(e) => run(() => updateTaskFields(taskId, { team_id: e.target.value || null }))}
+              onChange={(e) => run(() => updateTaskFields(taskId, { team_id: e.target.value || null }), teamPatch(e.target.value || null))}
             >
               <option value="">No team</option>
               {projectTeams.map((t) => (
@@ -553,14 +593,14 @@ export function TaskPanel({
                 <input
                   type="checkbox"
                   defaultChecked={task.is_milestone}
-                  onChange={(e) => run(() => updateTaskFields(taskId, { is_milestone: e.target.checked }))}
+                  onChange={(e) => run(() => updateTaskFields(taskId, { is_milestone: e.target.checked }), { is_milestone: e.target.checked })}
                 />
                 Milestone
               </label>
               {task.is_milestone ? (
                 <DateGuideField
                   value={task.start_date ?? ""}
-                  onChange={(v) => run(() => updateTaskFields(taskId, { start_date: v, due_date: v }))}
+                  onChange={(v) => run(() => updateTaskFields(taskId, { start_date: v, due_date: v }), { start_date: v, due_date: v })}
                   guideStart={parentGuideStart}
                   guideDue={parentGuideDue}
                 />
@@ -570,14 +610,14 @@ export function TaskPanel({
                     <DateGuideField
                       label="Start"
                       value={task.start_date ?? ""}
-                      onChange={(v) => run(() => updateTaskFields(taskId, { start_date: v }))}
+                      onChange={(v) => run(() => updateTaskFields(taskId, { start_date: v }), { start_date: v })}
                       guideStart={parentGuideStart}
                       guideDue={parentGuideDue}
                     />
                     <DateGuideField
                       label="Due"
                       value={task.due_date ?? ""}
-                      onChange={(v) => run(() => updateTaskFields(taskId, { due_date: v }))}
+                      onChange={(v) => run(() => updateTaskFields(taskId, { due_date: v }), { due_date: v })}
                       guideStart={parentGuideStart}
                       guideDue={parentGuideDue}
                     />

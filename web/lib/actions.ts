@@ -18,6 +18,7 @@ import type {
   Deal,
   Contact,
   Task,
+  ScheduleChange,
   WorkflowTransitionAction,
   TransitionActionType,
   TransitionActionConfig,
@@ -489,9 +490,12 @@ export async function removeLink(fromTaskId: string, toTaskId: string, linkType:
 // prototype's autoArrange()/propagateSchedule() (see gantt-schedule.ts for
 // the actual math). This first Gantt pass has no live drag-to-reschedule,
 // so this just fetches every non-helpdesk task + link in the org, computes
-// the settled schedule, and writes back only what changed. Returns how many
-// tasks moved, so the UI can say something more useful than silence.
-export async function autoArrangeSchedule(orgId: string): Promise<number> {
+// the settled schedule, and writes back only what changed. Returns every
+// task that actually moved (id + its new dates), not just a count — the
+// Gantt view's optimistic-patch overlay applies these directly rather than
+// waiting on router.refresh() (see ScheduleChange's own comment in
+// lib/types.ts).
+export async function autoArrangeSchedule(orgId: string): Promise<ScheduleChange[]> {
   const { supabase } = await requireUser();
 
   const [{ data: tasks }, { data: links }, { data: projects }] = await Promise.all([
@@ -543,7 +547,7 @@ export async function autoArrangeSchedule(orgId: string): Promise<number> {
     );
     revalidatePath("/dashboard");
   }
-  return finalChanges.size;
+  return Array.from(finalChanges.entries()).map(([id, { start, due }]) => ({ id, start_date: start, due_date: due }));
 }
 
 // The Gantt view's live drag-to-move / drag-to-resize commit — ported from
@@ -563,7 +567,14 @@ export async function autoArrangeSchedule(orgId: string): Promise<number> {
 // gantt-view.tsx), but this is what actually decides and persists it, the
 // same "never trust the client alone" principle every other server-side
 // gate in this file already follows.
-export async function updateTaskSchedule(orgId: string, taskId: string, start: string, due: string): Promise<number> {
+//
+// Returns every task the commit actually moved — the dragged task itself
+// plus whatever the cascade/containment math pulled along with it — so the
+// Gantt view's optimistic-patch overlay can apply all of them the instant
+// this resolves, instead of only patching the one bar it already knows
+// about and leaving every cascaded one to wait on router.refresh() (see
+// ScheduleChange's own comment in lib/types.ts).
+export async function updateTaskSchedule(orgId: string, taskId: string, start: string, due: string): Promise<ScheduleChange[]> {
   const { supabase } = await requireUser();
 
   const [{ data: tasks }, { data: links }, { data: projects }] = await Promise.all([
@@ -588,7 +599,7 @@ export async function updateTaskSchedule(orgId: string, taskId: string, start: s
       parentId: t.parent_task_id,
     }));
 
-  if (!baseTasks.some((t) => t.id === taskId)) return 0;
+  if (!baseTasks.some((t) => t.id === taskId)) return [];
 
   // Containment part 1: can't shrink a parent past what its own subtasks
   // (and their own subtasks) currently need.
@@ -622,7 +633,7 @@ export async function updateTaskSchedule(orgId: string, taskId: string, start: s
     )
   );
   revalidatePath("/dashboard");
-  return finalChanges.size;
+  return Array.from(finalChanges.entries()).map(([id, { start: s, due: d }]) => ({ id, start_date: s, due_date: d }));
 }
 
 // Rewrites a set of top-level tasks' Gantt-only position 0..n-1 in one

@@ -232,6 +232,7 @@ export function GanttView({
   vocabTask,
   onSelectTask,
   onPreviewTask,
+  onPatchTasks,
 }: {
   rows: TaskRow[];
   projects: Project[];
@@ -240,6 +241,12 @@ export function GanttView({
   vocabTask: string;
   onSelectTask: (id: string) => void;
   onPreviewTask: (id: string, x: number, y: number) => void;
+  // Optimistic patch overlay hook (see tasks-workspace.tsx's own comment on
+  // `taskPatches`) — called the instant a schedule commit resolves with
+  // every task the server actually moved (the drag itself plus any
+  // cascade/containment fallout), so the chart never has to wait on
+  // router.refresh() re-fetching before it can show the real result.
+  onPatchTasks: (patches: Record<string, { start_date: string; due_date: string }>) => void;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -326,8 +333,20 @@ export function GanttView({
     setError(null);
     startTransition(async () => {
       try {
-        const count = await autoArrangeSchedule(orgId);
-        setMessage(count > 0 ? `Rescheduled ${count} ${count === 1 ? vocabTask.toLowerCase() : vocabTask.toLowerCase() + "s"}.` : "Already in order — nothing to move.");
+        const changes = await autoArrangeSchedule(orgId);
+        // Auto-arrange can touch tasks anywhere in the org, several rows
+        // away from anything currently on screen mid-drag, so there's no
+        // "live" position to preserve here the way a drag has — patch
+        // straight to the server's real answer instead of waiting on
+        // router.refresh() to re-render with it.
+        if (changes.length > 0) {
+          onPatchTasks(Object.fromEntries(changes.map((c) => [c.id, { start_date: c.start_date, due_date: c.due_date }])));
+        }
+        setMessage(
+          changes.length > 0
+            ? `Rescheduled ${changes.length} ${changes.length === 1 ? vocabTask.toLowerCase() : vocabTask.toLowerCase() + "s"}.`
+            : "Already in order — nothing to move."
+        );
         router.refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Couldn't auto-arrange.");
@@ -337,9 +356,23 @@ export function GanttView({
 
   const commitSchedule = useCallback(
     (taskId: string, start: string, due: string) => {
+      // Patch the dragged bar's own new dates immediately, before the
+      // server round-trip even starts — this is what actually fixes the
+      // "laggy" feel: without it, the live drag's direct DOM patch ends on
+      // mouseup and React's very next render falls back to the still-stale
+      // `rows` prop, snapping the bar back to where it started until
+      // router.refresh() eventually lands and it jumps forward again.
+      onPatchTasks({ [taskId]: { start_date: start, due_date: due } });
       startTransition(async () => {
         try {
-          await updateTaskSchedule(orgId, taskId, start, due);
+          const changes = await updateTaskSchedule(orgId, taskId, start, due);
+          // Layer in whatever else the cascade/containment math moved (a
+          // blocked task pushed later, a concurrent/clone partner
+          // re-synced, an ancestor grown) — none of that was visible from
+          // the drag alone.
+          if (changes.length > 0) {
+            onPatchTasks(Object.fromEntries(changes.map((c) => [c.id, { start_date: c.start_date, due_date: c.due_date }])));
+          }
           router.refresh();
         } catch (err) {
           setError(err instanceof Error ? err.message : "Couldn't save that change — reloading.");
@@ -347,7 +380,7 @@ export function GanttView({
         }
       });
     },
-    [orgId, router, startTransition]
+    [orgId, router, startTransition, onPatchTasks]
   );
 
   const commitLink = useCallback(

@@ -254,6 +254,21 @@ export interface Task {
   position: number;
 }
 
+// What updateTaskSchedule/autoArrangeSchedule (lib/actions.ts) actually
+// changed on commit — every task whose start/due moved, not just the one
+// directly dragged (a cascade can push a blocked task, resync a
+// concurrent/clone partner, or grow a parent for containment). The Gantt
+// view's optimistic-patch overlay (tasks-workspace.tsx) applies these
+// straight to its local patch map the moment the action resolves, instead
+// of waiting on router.refresh() to re-fetch and re-render with the new
+// dates — see that overlay's own comment for why a full local-state lift
+// isn't used instead.
+export interface ScheduleChange {
+  id: string;
+  start_date: string;
+  due_date: string;
+}
+
 export interface TaskLink {
   id: string;
   org_id: string;
