@@ -13,6 +13,7 @@ import type {
   Project,
   TaskLink,
   Task,
+  Deal,
   Role,
   Doc,
   TaskObject,
@@ -165,6 +166,8 @@ export function TaskPanel({
   assets,
   actingAsUserId,
   onOpenAsset,
+  deals,
+  onOpenDeal,
   onSelectDoc,
   onWidthChange,
   onClose,
@@ -202,6 +205,13 @@ export function TaskPanel({
   // undefined when viewing as yourself, the normal case.
   actingAsUserId?: string | null;
   onOpenAsset: (assetId: string) => void;
+  // Deals a Workflow automation's create_task/update_linked_tasks action
+  // linked this task to (task.deal_id) — see schema.sql's own comment on
+  // workflow_transition_actions. Only ever populated once CRM data has
+  // loaded (TasksWorkspace's own useEffect), same as everywhere else Deals
+  // show up outside the Deals tab itself.
+  deals: Deal[];
+  onOpenDeal: (dealId: string) => void;
   // Opens the linked doc's own panel beside this one (double-width, see
   // .panel-doc in globals.css) without closing this task's panel — omit to
   // fall back to a non-clickable row.
@@ -231,6 +241,7 @@ export function TaskPanel({
   const row = allRows.find((r) => r.task.id === taskId);
   const task = row?.task;
   const project = task ? projects.find((p) => p.id === task.project_id) : undefined;
+  const linkedDeal = task?.deal_id ? deals.find((d) => d.id === task.deal_id) : undefined;
   const isWidenable = !!project?.is_helpdesk && task?.kind !== "asset_allocation";
   const effectiveWidth = isWidenable ? panelWidth : "normal";
 
@@ -341,6 +352,18 @@ export function TaskPanel({
               {task.display_id && <span className="task-id-badge" style={{ marginRight: 6 }}>{task.display_id}</span>}
               {project?.name}
               {row.teamName ? ` · ${row.teamName}` : ""}
+              {linkedDeal && (
+                <>
+                  {" · "}
+                  {/* This task came from (or was linked to) a deal's stage
+                      transition — see schema.sql's own comment on
+                      workflow_transition_actions. Click-through mirrors
+                      onOpenAsset's own asset-card click-through above. */}
+                  <span style={{ cursor: "pointer", textDecoration: "underline" }} onClick={() => onOpenDeal(linkedDeal.id)} title="Open linked deal">
+                    Deal: {linkedDeal.title}
+                  </span>
+                </>
+              )}
             </div>
           </div>
           {isWidenable && (

@@ -4,6 +4,7 @@ import type {
   Task,
   WorkflowStatus,
   WorkflowTransition,
+  WorkflowTransitionAction,
   Workflow,
   Team,
   TaskLink,
@@ -75,6 +76,7 @@ export interface WorkspaceData {
   tasks: Task[];
   statuses: WorkflowStatus[];
   transitions: WorkflowTransition[];
+  transitionActions: WorkflowTransitionAction[];
   workflows: Workflow[];
   teams: Team[];
   projects: Project[];
@@ -182,6 +184,7 @@ export async function getWorkspaceData(userId: string): Promise<WorkspaceData | 
     { data: tasks },
     { data: statuses },
     { data: transitions },
+    { data: transitionActions },
     { data: workflows },
     { data: teams },
     { data: projects },
@@ -201,6 +204,12 @@ export async function getWorkspaceData(userId: string): Promise<WorkspaceData | 
     supabase.from("tasks").select("*").eq("org_id", orgId).order("created_at", { ascending: false }),
     supabase.from("workflow_statuses").select("*").eq("org_id", orgId).order("position"),
     supabase.from("workflow_transitions").select("*").eq("org_id", orgId),
+    // Settings-only, org-wide-tiny table — stays in the one full-org fetch
+    // rather than getting its own scoped fetch the way Companies/Deals did
+    // (see lib/actions.ts's own header comment on that split); the Workflow
+    // & roles editor that reads/writes this already lives entirely on the
+    // revalidatePath/router.refresh() pattern this fetch backs.
+    supabase.from("workflow_transition_actions").select("*").eq("org_id", orgId).order("position"),
     supabase.from("workflows").select("*").eq("org_id", orgId).order("created_at"),
     supabase.from("teams").select("*").eq("org_id", orgId),
     supabase.from("projects").select("*").eq("org_id", orgId),
@@ -401,6 +410,7 @@ export async function getWorkspaceData(userId: string): Promise<WorkspaceData | 
     tasks: (tasks ?? []) as Task[],
     statuses: (statuses ?? []) as WorkflowStatus[],
     transitions: (transitions ?? []) as WorkflowTransition[],
+    transitionActions: (transitionActions ?? []) as WorkflowTransitionAction[],
     workflows: (workflows ?? []) as Workflow[],
     teams: (teams ?? []) as Team[],
     projects: (projects ?? []) as Project[],

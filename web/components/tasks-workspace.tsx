@@ -7,6 +7,7 @@ import { buildBucketColumns } from "@/lib/buckets-view";
 import type {
   WorkflowStatus,
   WorkflowTransition,
+  WorkflowTransitionAction,
   Workflow,
   Company,
   Deal,
@@ -144,6 +145,7 @@ export function TasksWorkspace({
   links,
   statuses,
   transitions,
+  transitionActions,
   workflows,
   teams,
   projects,
@@ -186,6 +188,7 @@ export function TasksWorkspace({
   links: TaskLink[];
   statuses: WorkflowStatus[];
   transitions: WorkflowTransition[];
+  transitionActions: WorkflowTransitionAction[];
   workflows: Workflow[];
   teams: Team[];
   projects: Project[];
@@ -601,6 +604,14 @@ export function TasksWorkspace({
             setSelectedTaskId(null);
             setSelectedAssetId(assetId);
           }}
+          deals={deals}
+          onOpenDeal={(dealId) => {
+            // Same click-through as onOpenAsset just above, for the deal a
+            // Workflow automation linked this task to (tasks.deal_id) — see
+            // schema.sql's own comment on workflow_transition_actions.
+            setSelectedTaskId(null);
+            setSelectedDealId(dealId);
+          }}
           onSelectDoc={setSelectedDocId}
           onWidthChange={setMainPanelWidthPx}
           onClose={() => setSelectedTaskId(null)}
@@ -776,6 +787,8 @@ export function TasksWorkspace({
           workflows={workflows}
           statuses={statuses}
           transitions={transitions}
+          transitionActions={transitionActions}
+          projects={projects}
           members={members}
           currentUserRole={effectiveUserRole}
           vocabTask={vocabTask}

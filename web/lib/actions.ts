@@ -6,7 +6,25 @@ import { revalidatePath } from "next/cache";
 import { autoArrangeCompute, cascadeSchedule, clampToDescendants, applyParentContainment, type ScheduleTask, type Resolved } from "@/lib/gantt-schedule";
 import { TASK_ATTACHMENTS_BUCKET, TASK_ATTACHMENT_MAX_BYTES, taskAttachmentPath, ticketMessageAttachmentPath, sanitizeFilename } from "@/lib/storage";
 import { replyToAddressForTask } from "@/lib/channel-verify";
-import type { FormField, FormFieldType, Role, OrgTemplate, TicketChannel, WorkflowType, DevTools, Company, Deal, Contact } from "@/lib/types";
+import type {
+  FormField,
+  FormFieldType,
+  Role,
+  OrgTemplate,
+  TicketChannel,
+  WorkflowType,
+  DevTools,
+  Company,
+  Deal,
+  Contact,
+  Task,
+  WorkflowTransitionAction,
+  TransitionActionType,
+  TransitionActionConfig,
+  CreateTaskActionConfig,
+  TransitionLinkedTasksActionConfig,
+  UpdateLinkedTasksActionConfig,
+} from "@/lib/types";
 
 // The three role levels the prototype's own "Workflow & roles" panel ever
 // exposed (its ROLES constant: standard/authorizer/manager). "owner" and
@@ -2515,6 +2533,45 @@ export async function deleteWorkflowTransition(transitionId: string) {
   revalidatePath("/dashboard");
 }
 
+// Cross-entity automation — attaches one more action to a transition; see
+// schema.sql's own comment on workflow_transition_actions for the shapes
+// `config` takes per action_type, and the CRM section below (runDealStageActions)
+// for where these actually get executed. No update function: the editor
+// (components/workflow-panel.tsx) only ever adds or removes a whole action
+// rather than patching one field of an existing one — simpler UI for what's
+// normally a short, rarely-touched list per transition.
+export async function createWorkflowTransitionAction(
+  orgId: string,
+  transitionId: string,
+  actionType: TransitionActionType,
+  config: TransitionActionConfig
+): Promise<void> {
+  const { supabase } = await requireUser();
+  const { data: existing } = await supabase
+    .from("workflow_transition_actions")
+    .select("position")
+    .eq("transition_id", transitionId)
+    .order("position", { ascending: false })
+    .limit(1);
+  const nextPosition = existing && existing.length ? existing[0].position + 1 : 0;
+  const { error } = await supabase.from("workflow_transition_actions").insert({
+    org_id: orgId,
+    transition_id: transitionId,
+    action_type: actionType,
+    config,
+    position: nextPosition,
+  });
+  if (error) throw new Error(error.message);
+  revalidatePath("/dashboard");
+}
+
+export async function deleteWorkflowTransitionAction(actionId: string): Promise<void> {
+  const { supabase } = await requireUser();
+  const { error } = await supabase.from("workflow_transition_actions").delete().eq("id", actionId);
+  if (error) throw new Error(error.message);
+  revalidatePath("/dashboard");
+}
+
 // Real difference #2 from the prototype: its "Roles" section reassigns one
 // of 3 hardcoded demo users' in-memory role. Here it's a real org_members
 // row, so this deliberately rejects "owner"/"admin" on either end of the
@@ -3428,6 +3485,113 @@ export async function importProjectTemplate(
    here and stays its own separate, later pass.
 ============================================================================ */
 
+// Runs whatever workflow_transition_actions are attached to the
+// workflow_transition matching this exact from→to move, if any (deal moves
+// stay ungated regardless of whether that row exists — see updateDealStage's
+// own comment — a defined transition is only an attachment point for
+// automation, not a gate). Actions run in `position` order; each is
+// best-effort against its own config (a half-filled config, or a config
+// pointing at a status/project that's since been deleted, is skipped rather
+// than failing the whole move). Returns whether anything on the Tasks side
+// changed, so the caller knows whether it needs a full router.refresh() —
+// see updateDealStage's own comment on why that's still the fallback here.
+async function runDealStageActions(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  input: {
+    orgId: string;
+    dealId: string;
+    dealTitle: string;
+    workflowId: string;
+    fromStatusId: string;
+    toStatusId: string;
+    actorUserId: string;
+  }
+): Promise<{ affectedTasks: boolean }> {
+  const { data: transition } = await supabase
+    .from("workflow_transitions")
+    .select("id")
+    .eq("org_id", input.orgId)
+    .eq("workflow_id", input.workflowId)
+    .eq("from_status_id", input.fromStatusId)
+    .eq("to_status_id", input.toStatusId)
+    .maybeSingle();
+  if (!transition) return { affectedTasks: false };
+
+  const { data: rawActions } = await supabase
+    .from("workflow_transition_actions")
+    .select("*")
+    .eq("transition_id", transition.id)
+    .order("position");
+  const actions = (rawActions ?? []) as WorkflowTransitionAction[];
+  if (actions.length === 0) return { affectedTasks: false };
+
+  let affectedTasks = false;
+
+  for (const action of actions) {
+    if (action.action_type === "create_task") {
+      const config = action.config as CreateTaskActionConfig;
+      if (!config.project_id || !config.workflow_status_id) continue;
+      const { task_number, display_id } = await assignDisplayId(supabase, config.project_id);
+      const title = (config.title || "{{deal}}").trim().replace(/\{\{\s*deal\s*\}\}/g, input.dealTitle) || input.dealTitle;
+      const { data: created, error } = await supabase
+        .from("tasks")
+        .insert({
+          org_id: input.orgId,
+          project_id: config.project_id,
+          status_id: config.workflow_status_id,
+          title,
+          assignee_id: config.assignee_id ?? null,
+          deal_id: input.dealId,
+          created_by: input.actorUserId,
+          task_number,
+          display_id,
+        })
+        .select("id")
+        .single();
+      if (!error && created) {
+        await logActivity(supabase, { orgId: input.orgId, taskId: created.id as string, type: "created", actorUserId: input.actorUserId });
+        affectedTasks = true;
+      }
+    } else if (action.action_type === "transition_linked_tasks") {
+      const config = action.config as TransitionLinkedTasksActionConfig;
+      if (!config.workflow_status_id) continue;
+      const { data: targetStatus } = await supabase
+        .from("workflow_statuses")
+        .select("workflow_id")
+        .eq("id", config.workflow_status_id)
+        .maybeSingle();
+      if (!targetStatus) continue;
+
+      const { data: linkedTasks } = await supabase.from("tasks").select("id, project_id").eq("deal_id", input.dealId);
+      if (linkedTasks && linkedTasks.length > 0) {
+        // Only tasks whose own project runs the same task workflow that
+        // target status belongs to — a linked task on a different task
+        // workflow has no equivalent status to land on, so it's left where
+        // it is rather than moved somewhere nonsensical.
+        const projectIds = Array.from(new Set(linkedTasks.map((t) => t.project_id)));
+        const { data: linkedProjects } = await supabase.from("projects").select("id, workflow_id").in("id", projectIds);
+        const workflowIdByProject = new Map((linkedProjects ?? []).map((p) => [p.id as string, p.workflow_id as string]));
+        const matchingTaskIds = linkedTasks
+          .filter((t) => workflowIdByProject.get(t.project_id as string) === targetStatus.workflow_id)
+          .map((t) => t.id as string);
+        if (matchingTaskIds.length > 0) {
+          const { error } = await supabase.from("tasks").update({ status_id: config.workflow_status_id }).in("id", matchingTaskIds);
+          if (!error) affectedTasks = true;
+        }
+      }
+    } else if (action.action_type === "update_linked_tasks") {
+      const config = action.config as UpdateLinkedTasksActionConfig;
+      const patch: Partial<Pick<Task, "assignee_id">> = {};
+      if (config.assignee_id !== undefined) patch.assignee_id = config.assignee_id;
+      if (Object.keys(patch).length === 0) continue;
+      const { error } = await supabase.from("tasks").update(patch).eq("deal_id", input.dealId);
+      if (!error) affectedTasks = true;
+    }
+  }
+
+  return { affectedTasks };
+}
+
 export async function getCompaniesData(orgId: string): Promise<Company[]> {
   const { supabase } = await requireUser();
   const { data, error } = await supabase.from("companies").select("*").eq("org_id", orgId).order("name");
@@ -3556,14 +3720,42 @@ export async function updateDealFields(
 // The kanban's own drag-to-move — kept as its own narrower function rather
 // than folded into updateDealFields above, mirroring how updateTaskStatus
 // is separate from updateTaskFields: a stage move is the one Deal edit
-// that's most likely to grow its own side-effects later (an activity log
-// entry, a "deal won -> convert to project" automation — see the CRM plan's
-// Phase E), so it gets one clear call site to attach that to instead of a
-// call-site hunt across every place a deal's status_id gets patched.
-export async function updateDealStage(dealId: string, statusId: string): Promise<void> {
-  const { supabase } = await requireUser();
+// that's most likely to grow its own side-effects later, which is now true —
+// this is the "deal transition can create/update/move tasks" call site (see
+// runDealStageActions above). Returns whether any of that automation
+// touched a task: Companies/Deals stay on the local-state, no-refresh
+// pattern (this function's own header comment on the CRM section explains
+// why), but a task created/moved/reassigned from here needs to reach the
+// Tasks side of the app somehow, and that side doesn't hold its own tasks in
+// local state yet (see the Tasks/Projects perf-refactor work-in-progress) —
+// so for now the caller falls back to router.refresh() exactly when this
+// says to, rather than on every deal move. Once Tasks/Projects gets its own
+// local state, this return value becomes what tells the caller which rows
+// to merge in instead of what tells it to refresh at all.
+export async function updateDealStage(dealId: string, statusId: string): Promise<{ affectedTasks: boolean }> {
+  const { supabase, user } = await requireUser();
+  const { data: deal } = await supabase
+    .from("deals")
+    .select("id, org_id, title, workflow_id, status_id")
+    .eq("id", dealId)
+    .maybeSingle();
+  if (!deal) throw new Error("Deal not found.");
+  const fromStatusId = deal.status_id as string;
+
   const { error } = await supabase.from("deals").update({ status_id: statusId }).eq("id", dealId);
   if (error) throw new Error(error.message);
+
+  if (fromStatusId === statusId) return { affectedTasks: false };
+
+  return runDealStageActions(supabase, {
+    orgId: deal.org_id as string,
+    dealId,
+    dealTitle: deal.title as string,
+    workflowId: deal.workflow_id as string,
+    fromStatusId,
+    toStatusId: statusId,
+    actorUserId: user.id,
+  });
 }
 
 export async function deleteDeal(dealId: string): Promise<void> {

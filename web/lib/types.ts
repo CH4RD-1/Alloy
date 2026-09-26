@@ -133,6 +133,54 @@ export interface WorkflowTransition {
   require_checklists_complete: boolean;
 }
 
+// Cross-entity automation — see schema.sql's own comment on
+// workflow_transition_actions for the full rationale. v1 only wires these up
+// for 'deal'-type workflows acting on tasks (updateDealStage in
+// lib/actions.ts); the table/types are generic so a 'task' workflow could
+// carry actions too, but nothing executes them yet.
+export type TransitionActionType = "create_task" | "transition_linked_tasks" | "update_linked_tasks";
+
+// Makes one new task in `project_id`, at `workflow_status_id` (must belong
+// to that project's own task/helpdesk workflow), linked to the triggering
+// deal via tasks.deal_id. `title` may contain the literal token "{{deal}}",
+// replaced with the deal's own title when the action runs (see
+// resolveActionTitle in lib/actions.ts) — the only templating this supports.
+export interface CreateTaskActionConfig {
+  title: string;
+  project_id: string;
+  workflow_status_id: string;
+  assignee_id?: string | null;
+}
+
+// Moves every task already linked to the triggering deal (tasks.deal_id)
+// into `workflow_status_id` — but only the ones whose own project runs the
+// same task workflow that status belongs to; a linked task on a different
+// task workflow is left alone rather than erroring (see
+// runTransitionActions' own comment).
+export interface TransitionLinkedTasksActionConfig {
+  workflow_status_id: string;
+}
+
+// Reassigns every task linked to the triggering deal. Both fields optional
+// so an action can set just one; a fully-empty config is a no-op.
+export interface UpdateLinkedTasksActionConfig {
+  assignee_id?: string | null;
+}
+
+export type TransitionActionConfig =
+  | CreateTaskActionConfig
+  | TransitionLinkedTasksActionConfig
+  | UpdateLinkedTasksActionConfig;
+
+export interface WorkflowTransitionAction {
+  id: string;
+  org_id: string;
+  transition_id: string;
+  action_type: TransitionActionType;
+  config: TransitionActionConfig;
+  position: number;
+}
+
 // (Project is defined once, above, alongside Org — a leftover duplicate
 // declaration used to sit here; removed since it had started to drift out
 // of sync with the real one when the task-id columns were added.)
@@ -192,6 +240,10 @@ export interface Task {
   // See schema.sql's own comment on this column — set only for a
   // contact-facing ticket, used to build its "check progress" magic link.
   portal_access_token: string | null;
+  // CRM cross-entity link — set on a task a deal-stage transition's
+  // create_task action made, or one linked by hand from the task panel. See
+  // schema.sql's own comment on workflow_transition_actions.
+  deal_id: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
